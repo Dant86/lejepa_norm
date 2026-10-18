@@ -1,3 +1,4 @@
+import os
 import pathlib
 
 import pytest
@@ -16,7 +17,10 @@ _VARS = [
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in _VARS:
-        monkeypatch.delenv(var, raising=False)
+        # Set-then-delete so monkeypatch records "unset" and removes anything
+        # load_dotenv writes into os.environ during the test.
+        monkeypatch.setenv(var, "")
+        monkeypatch.delenv(var)
 
 
 def _write_env(path: pathlib.Path, **overrides: str) -> pathlib.Path:
@@ -54,3 +58,12 @@ def test_missing_variable_names_the_variable(tmp_path: pathlib.Path) -> None:
     env.write_text(f"{paths.DATA_DIR_VAR}=/d\n")
     with pytest.raises(KeyError, match=paths.RUNS_DIR_VAR):
         paths.load_paths(env)
+
+
+def test_env_file_values_do_not_leak_between_tests(tmp_path: pathlib.Path) -> None:
+    paths.load_paths(_write_env(tmp_path / ".env"))
+    assert paths.DATA_DIR_VAR in os.environ  # visible within this test...
+
+
+def test_environment_is_clean_in_the_next_test() -> None:
+    assert paths.DATA_DIR_VAR not in os.environ  # ...but gone afterwards
