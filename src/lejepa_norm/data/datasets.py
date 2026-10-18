@@ -1,11 +1,17 @@
 """Dataset readers over the prepared layout (`data.layout`).
 
-Arrays are opened as read-only memory maps, so many DataLoader workers share one
-page cache instead of each loading the data.
+Arrays are read fully into RAM by default (`in_memory=True`). Memory-mapping looks
+cheaper, but on the cluster's network filesystem each random read of a ~27 KB image
+cost ~100 ms (measured with `scripts/bench_data.py`: 83 images/s through a
+DataLoader vs. 1200 images/s from RAM). A sequential read of the whole array is fast
+(~11 s for STL-10 `unlabeled`), and forked DataLoader workers share the array
+copy-on-write, so memory is not multiplied. Pass `in_memory=False` for a read-only
+memory map, e.g. for arrays too large for RAM.
 """
 
 import collections.abc
 import os
+import pathlib
 import typing
 
 import numpy as np
@@ -47,15 +53,20 @@ class ImageArrayDataset[T](torch.utils.data.Dataset[tuple[T, int]]):
         return typing.cast(T, item), int(self.labels[index])
 
 
+def _load_images(path: pathlib.Path, in_memory: bool) -> np.ndarray:
+    return np.load(path, mmap_mode=None if in_memory else "r")
+
+
 def load_split[T](
     data_dir: str | os.PathLike[str],
     dataset: str,
     split: str,
     transform: collections.abc.Callable[[PIL.Image.Image], T] | None = None,
+    in_memory: bool = True,
 ) -> ImageArrayDataset[T]:
     """Opens `dataset`/`split` (e.g. `stl10`/`train`) from the prepared layout."""
     return ImageArrayDataset(
-        np.load(layout.images_path(data_dir, dataset, split), mmap_mode="r"),
+        _load_images(layout.images_path(data_dir, dataset, split), in_memory),
         np.load(layout.labels_path(data_dir, dataset, split)),
         transform,
     )
@@ -66,12 +77,12 @@ def load_corrupted[T](
     corruption: str,
     severity: int,
     transform: collections.abc.Callable[[PIL.Image.Image], T] | None = None,
+    in_memory: bool = True,
 ) -> ImageArrayDataset[T]:
     """Opens STL-10-C (`corruption`, `severity`) with the STL-10 test labels."""
     return ImageArrayDataset(
-        np.load(
-            layout.corrupted_images_path(data_dir, corruption, severity),
-            mmap_mode="r",
+        _load_images(
+            layout.corrupted_images_path(data_dir, corruption, severity), in_memory
         ),
         np.load(layout.labels_path(data_dir, "stl10", "test")),
         transform,
@@ -81,11 +92,12 @@ def load_corrupted[T](
 def load_pretraining[T](
     data_dir: str | os.PathLike[str],
     transform: collections.abc.Callable[[PIL.Image.Image], T] | None = None,
+    in_memory: bool = True,
 ) -> torch.utils.data.ConcatDataset[tuple[T, int]]:
     """STL-10 `unlabeled` + `train` (labels present but unused in pretraining)."""
     return torch.utils.data.ConcatDataset(
         [
-            load_split(data_dir, "stl10", "unlabeled", transform),
-            load_split(data_dir, "stl10", "train", transform),
+            load_split(data_dir, "stl10", "unlabeled", transform, in_memory),
+            load_split(data_dir, "stl10", "train", transform, in_memory),
         ]
     )

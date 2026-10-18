@@ -10,3 +10,4 @@ dist/
 .claude/worktrees/
 # Fallback SLURM output (job logs proper go into the run directory).
 slurm-*.out
+notebooks/

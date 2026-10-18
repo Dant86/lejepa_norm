@@ -74,7 +74,9 @@ def main() -> None:
         print(f"memmap random read ({label}): {ms:.2f} ms/image")
 
     transform = views.MultiViewTransform(cfg)
-    dataset = datasets.load_split(data_dir, "stl10", "unlabeled", transform)
+    dataset = datasets.load_split(
+        data_dir, "stl10", "unlabeled", transform, in_memory=False
+    )
     sample = [dataset.images[i] for i in range(64)]  # pyright: ignore[reportAttributeAccessIssue]
     start = time.perf_counter()
     for array in sample:
