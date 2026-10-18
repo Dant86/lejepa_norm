@@ -238,6 +238,11 @@ def load_config(
     return _build(ExperimentConfig, raw, "")
 
 
+def from_dict(raw: collections.abc.Mapping[str, typing.Any]) -> ExperimentConfig:
+    """Builds a validated config from a plain dict (as produced by `to_dict`)."""
+    return _build(ExperimentConfig, raw, "")
+
+
 def to_dict(cfg: object) -> dict[str, typing.Any]:
     """Converts a config to plain YAML-ready types (tuples become lists)."""
 
