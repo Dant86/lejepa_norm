@@ -47,9 +47,9 @@ ID, so all attempts land in the same log; each attempt starts with a header
 showing `restart #N` (`SLURM_RESTART_COUNT`). The `slurm-%x-%j.out` file in the
 submit directory only catches errors before the run directory is known.
 
-GPU type: the templates request `--gres=gpu:1` without a model. The cluster has
-A40, A100, L40S, H100 and H200 nodes, but the selection syntax is not confirmed
-yet (see the TODO in the GPU templates).
+GPU type: the GPU templates request `--gres=gpu:a100:1` so that run times are
+comparable across runs. The general partition also has A40, L40S, H100 and H200
+nodes; change the type in the template (see `sinfo -o "%P %G"`) to use another.
 
 ## Preemption and resume
 
