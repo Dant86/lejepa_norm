@@ -95,3 +95,4 @@ this file holds the rules every session must follow.
 | `LEJEPA_NORM_EMBED_DIR` | Embedding dumps produced by `apps/embed.py` |
 | `LEJEPA_NORM_NOTES_DIR` | `research_notes/` in the repo checkout |
 | `LEJEPA_NORM_KALEIDO_CHROME` | Chrome binary used by Kaleido |
+| `LEJEPA_NORM_PYTHON` | Interpreter used by the SLURM templates (optional; default `.venv/bin/python`) |

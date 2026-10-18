@@ -28,9 +28,9 @@
 #SBATCH --mem=32G
 #SBATCH --partition=general
 #SBATCH --qos=general
-# TODO(cluster docs): GPU model selection syntax is not documented (nodes have
-# A40/A100/L40S/H100/H200); add a type here only once confirmed.
-#SBATCH --gres=gpu:1
+# Pin the GPU model so run times are comparable: the general partition mixes
+# A40/A100/L40S/H100/H200 nodes (`sinfo -o "%P %G"`); gres syntax is type:count.
+#SBATCH --gres=gpu:a100:1
 # 12:00:00 is the maximum wall time of the general QoS.
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:USR1@300
