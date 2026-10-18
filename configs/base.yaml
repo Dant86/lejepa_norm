@@ -9,8 +9,8 @@ data:
   global_scale: [0.3, 1.0]
   local_scale: [0.05, 0.3]
   num_workers: 8
-  mean: [0.4467, 0.4398, 0.4066]
-  std: [0.2603, 0.2566, 0.2713]
+  mean: [0.4409, 0.4279, 0.3868]
+  std: [0.2683, 0.2610, 0.2687]
   corruptions:
     [gaussian_noise, shot_noise, impulse_noise, speckle_noise, gaussian_blur,
      defocus_blur, contrast, brightness, jpeg_compression, pixelate]
