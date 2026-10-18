@@ -7,11 +7,14 @@ shards only; it never re-runs the model.
 
 import dataclasses
 import os
+import pathlib
 
 import numpy
 import numpy.typing
 
 CENTER_VIEW = 0
+# Suffix of a shard being written (not matched by `*.npz`).
+PARTIAL_SUFFIX = ".partial"
 
 
 @dataclasses.dataclass
@@ -45,8 +48,16 @@ class EmbeddingShard:
 
 
 def save_shard(path: str | os.PathLike[str], shard: EmbeddingShard) -> None:
-    """Writes `shard` as an uncompressed `.npz` file."""
-    numpy.savez(path, **dataclasses.asdict(shard))
+    """Writes `shard` as an uncompressed `.npz` file, atomically.
+
+    The data goes to `<path>.partial` first and is then renamed, so a shard that
+    exists is complete even if the writer was killed.
+    """
+    dest = pathlib.Path(path)
+    partial = dest.with_name(dest.name + PARTIAL_SUFFIX)
+    with partial.open("wb") as f:
+        numpy.savez(f, **dataclasses.asdict(shard))
+    os.replace(partial, dest)
 
 
 def load_shard(path: str | os.PathLike[str]) -> EmbeddingShard:

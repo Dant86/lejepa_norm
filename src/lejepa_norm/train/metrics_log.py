@@ -6,6 +6,9 @@ completed so far) and `epoch` (1-based epoch the record belongs to), so
 hold values at that step; epoch records hold epoch means under keys ending in
 `_epoch_mean`, plus throughput and (every `knn_every_epochs`) online k-NN
 accuracy. Logging is local only.
+
+When a run resumes from `train.resume`, `MetricsLog.truncate` first drops every
+record written after the resumed step, so the log never holds duplicate steps.
 """
 
 import json
@@ -37,3 +40,33 @@ class MetricsLog:
         }
         with self.path.open("a") as f:
             f.write(json.dumps(clean) + "\n")
+
+    def truncate(self, max_step: int) -> int:
+        """Drops records with `step > max_step` and unparsable lines.
+
+        Used when resuming: records written after the resume point would be
+        logged again. A line cut short by a killed job is unparsable and dropped
+        too. The file is rewritten atomically; a missing file is left missing.
+
+        Args:
+            max_step: Last optimizer step whose records are kept (0 drops all).
+
+        Returns:
+            Number of lines dropped.
+        """
+        if not self.path.exists():
+            return 0
+        lines = self.path.read_text().splitlines(keepends=True)
+        kept: list[str] = []
+        for line in lines:
+            try:
+                record = typing.cast(dict[str, typing.Any], json.loads(line))
+                step = int(record["step"])
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                continue
+            if step <= max_step:
+                kept.append(line if line.endswith("\n") else line + "\n")
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text("".join(kept))
+        os.replace(tmp, self.path)
+        return len(lines) - len(kept)

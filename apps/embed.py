@@ -5,6 +5,9 @@ For each evaluation set, every image is embedded un-augmented (view 0) and under
 `z` and backbone features `h` are written as `.npz` shards to
 `LEJEPA_NORM_EMBED_DIR/<run-name>/<eval_set>/` (layout in `lejepa_norm.eval.dumps`).
 
+Existing shards are an error unless `--overwrite` (replace them) or `--resume`
+(keep them and write only the missing ones, e.g. after preemption) is given.
+
 Example:
     python apps/embed.py --checkpoint runs/a_l0.05_s0/last.pt \
         --run-name a_l0.05_s0 --set eval.num_views=8
@@ -43,10 +46,17 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         default=None,
         help="Debug cap on images per image array (per corruption/severity).",
     )
-    parser.add_argument(
+    existing = parser.add_mutually_exclusive_group()
+    existing.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace existing shards instead of failing.",
+    )
+    existing.add_argument(
+        "--resume",
+        action="store_true",
+        help="Keep existing shards and write only the missing ones (continue an "
+        "interrupted job with the same checkpoint and arguments).",
     )
     return parser.parse_args(argv)
 
@@ -65,6 +75,7 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         eval_sets=[s.strip() for s in args.sets.split(",") if s.strip()],
         max_images=args.max_images,
         overwrite=args.overwrite,
+        resume=args.resume,
     )
     for name, count in counts.items():
         print(f"{name}: {count} images")

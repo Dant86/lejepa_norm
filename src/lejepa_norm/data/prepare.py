@@ -67,8 +67,10 @@ def _save_split(
 ) -> None:
     if images.dtype != np.uint8 or images.shape[1:] != (IMAGE_SIZE, IMAGE_SIZE, 3):
         raise ValueError(f"{dataset}/{split}: bad images {images.dtype} {images.shape}")
-    _save(layout.images_path(data_dir, dataset, split), images)
+    # Labels first: the images file is the "split done" marker the build skips on,
+    # so it must only appear once the labels are on disk.
     _save(layout.labels_path(data_dir, dataset, split), labels.astype(np.int64))
+    _save(layout.images_path(data_dir, dataset, split), images)
 
 
 def _resize(image: PIL.Image.Image) -> np.ndarray:
@@ -213,7 +215,9 @@ def build_stl10c(data_dir: pathlib.Path, cfg: config.DataConfig) -> None:
         "num_images": n,
     }
     meta_path = pathlib.Path(data_dir) / layout.STL10_C_DIR / "meta.json"
-    meta_path.write_text(json.dumps(meta, indent=2))
+    partial_meta = meta_path.with_name("meta.partial.json")
+    partial_meta.write_text(json.dumps(meta, indent=2))
+    os.replace(partial_meta, meta_path)
 
 
 def build(data_dir: str | os.PathLike[str], cfg: config.DataConfig) -> None:

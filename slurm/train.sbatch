@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pretrains one model with apps/train.py (single GPU).
+# Pretrains one model with apps/train.py (single GPU), preemption-safe.
 #
 # Usage (from the repo root):
 #   sbatch slurm/train.sbatch CONFIG RUN_NAME [--set KEY=VALUE ...]
@@ -7,21 +7,31 @@
 #   sbatch slurm/train.sbatch configs/base.yaml a_l0.05_s0 \
 #       --set loss.lambda=0.05 --set seed=0
 #
-# The job log goes to <LEJEPA_NORM_RUNS_DIR>/RUN_NAME/slurm-train-<jobid>.log; the
-# --output file below only catches failures before the run directory is known.
+# Runs with `--resume auto`: on preemption (or 300 s before the wall-time limit)
+# training saves <run_dir>/resume.pt and the job is requeued; the requeued job
+# continues from it. Resubmitting the same command after a failure also resumes,
+# and exits at once if the run already finished. See slurm/README.md.
+#
+# The job log goes to <LEJEPA_NORM_RUNS_DIR>/RUN_NAME/slurm-train-<jobid>.log
+# (appended across requeues); the --output file below only catches failures
+# before the run directory is known.
 #
 #SBATCH --job-name=lejepa-train
 #SBATCH --output=slurm-%x-%j.out
+#SBATCH --open-mode=append
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-# TODO(cluster docs): partition name; not yet looked up, do not guess.
-#SBATCH --partition=TODO_PARTITION
-# TODO(cluster docs): GPU request syntax and type (planned: 1x A100).
+#SBATCH --partition=general
+#SBATCH --qos=general
+# TODO(cluster docs): GPU model selection syntax is not documented (nodes have
+# A40/A100/L40S/H100/H200); add a type here only once confirmed.
 #SBATCH --gres=gpu:1
-# TODO(cluster docs): time limit allowed on the chosen partition.
-#SBATCH --time=TODO_TIME_LIMIT
+# 12:00:00 is the maximum wall time of the general QoS.
+#SBATCH --time=12:00:00
+#SBATCH --signal=B:USR1@300
+#SBATCH --requeue
 
 if [[ $# -lt 2 ]]; then
   echo "usage: sbatch slurm/train.sbatch CONFIG RUN_NAME [--set KEY=VALUE ...]" >&2
@@ -36,6 +46,6 @@ source slurm/common.sh
 log_to_run_dir "${RUN_NAME}" train
 
 set -x
-"${PYTHON}" apps/train.py --config "${CONFIG}" --run-name "${RUN_NAME}" \
-  --env-file "${ENV_FILE}" \
+run_preemptable "${PYTHON}" apps/train.py --config "${CONFIG}" \
+  --run-name "${RUN_NAME}" --env-file "${ENV_FILE}" --resume auto \
   --set "data.num_workers=${SLURM_CPUS_PER_TASK:-8}" "$@"
