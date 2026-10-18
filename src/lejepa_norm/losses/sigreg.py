@@ -12,8 +12,14 @@ empirical characteristic function `phi_N(t) = mean_n exp(i t x_n)` with the targ
 
 SIGReg projects the d-dimensional embeddings onto random unit directions `a`
 (resampled every call), computes EP on each projection `a^T z` and averages over
-directions. The integrand is even in `t`, so the integral over `[-t_max, t_max]` is
-twice a trapezoidal rule on `num_points` equally spaced nodes in `[0, t_max]`.
+directions. Given several views, `(V, N, d)`, the statistic is computed **per view**
+(with `N` the per-view batch size, the same directions for every view) and averaged
+over views. This is how the paper and the official implementation use it; pooling
+all views into one sample instead inflates the statistic by about the number of
+views and penalizes views of the same image for agreeing (see
+`research_notes/sigreg_reference/`). The integrand is even in `t`, so the integral
+over `[-t_max, t_max]` is twice a trapezoidal rule on `num_points` equally
+spaced nodes in `[0, t_max]`.
 
 Under the null (i.i.d. N(0, I) samples) `E[N |phi_N(t) - phi(t)|^2] = 1 - exp(-t^2)`
 exactly, so the expected statistic (its "noise floor") does not depend on `N` or
@@ -76,29 +82,33 @@ class SIGReg:
         return float((weights64 * (1.0 - torch.exp(-t64.square()))).sum())
 
     def __call__(self, z: torch.Tensor) -> torch.Tensor:
-        """Computes the statistic, averaged over random directions.
+        """Computes the statistic, averaged over random directions and views.
 
         Args:
-            z: Samples, shape `(N, d)`. Computation is in fp32 regardless of the
-                input dtype or an enclosing autocast region.
+            z: Samples, shape `(N, d)` for one view or `(V, N, d)` for `V` views;
+                each view is tested separately and the results are averaged.
+                Computation is in fp32 regardless of the input dtype or an
+                enclosing autocast region.
 
         Returns:
             Scalar tensor (differentiable with respect to `z`).
         """
-        if z.ndim != 2:
-            raise ValueError(f"z must be (N, d), got {tuple(z.shape)}")
+        if z.ndim not in (2, 3):
+            raise ValueError(f"z must be (N, d) or (V, N, d), got {tuple(z.shape)}")
         with torch.autocast(device_type=z.device.type, enabled=False):
             z = z.float()
-            n, d = z.shape
+            if z.ndim == 2:
+                z = z[None]
+            _, n, d = z.shape
             directions = torch.randn(
                 d, self.num_slices, device=z.device, generator=self._generator
             )
             directions = directions * directions.square().sum(0, keepdim=True).rsqrt()
             t, weights = self._grid(z.device)
-            # (N, slices, points): phase t * a^T z_n for every sample/slice/node.
-            phase = torch.matmul(z, directions)[:, :, None] * t
-            ecf_real = torch.cos(phase).mean(dim=0)
-            ecf_imag = torch.sin(phase).mean(dim=0)
+            # (V, N, slices, points): phase t * a^T z_n per view/sample/slice/node.
+            phase = torch.matmul(z, directions)[..., None] * t
+            ecf_real = torch.cos(phase).mean(dim=1)
+            ecf_imag = torch.sin(phase).mean(dim=1)
             target = torch.exp(-0.5 * t.square())
             sq_err = (ecf_real - target).square() + ecf_imag.square()
             per_slice = n * (sq_err * weights).sum(dim=-1)

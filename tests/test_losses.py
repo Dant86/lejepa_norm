@@ -138,3 +138,29 @@ def test_loss_config_reaches_sigreg() -> None:
     loss = lejepa.LeJEPALoss(cfg)
     assert (loss.sigreg.num_points, loss.sigreg.num_slices) == (9, 64)
     assert loss.sigreg.t_max == 2.0
+
+
+def test_sigreg_over_views_is_the_average_of_per_view_statistics() -> None:
+    z = torch.randn(6, 128, DIM, generator=_gen(11)) * torch.linspace(0.5, 1.5, DIM)
+    together = _sigreg(3)(z)
+    # Same seed -> same directions for every view, as in the multi-view call.
+    per_view = torch.stack([_sigreg(3)(z[v]) for v in range(z.shape[0])]).mean()
+    assert float(together) == pytest.approx(float(per_view), rel=1e-4)
+
+
+def test_loss_does_not_penalize_views_of_an_image_for_agreeing() -> None:
+    """Identical Gaussian views must sit at the noise floor, not at views x floor.
+
+    Pooling all views into one sample makes the statistic grow with how similar the
+    views of an image are (6x the floor when identical), which pushes the views
+    apart while the invariance term pulls them together.
+    """
+    sample = torch.randn(256, DIM, generator=_gen(5))
+    identical = sample.expand(6, -1, -1).contiguous()
+    floor = _sigreg().noise_floor
+    loss_fn = lejepa.LeJEPALoss(config.LossConfig(), generator=_gen(1))
+    _, stats = loss_fn(_views(identical))
+    assert float(stats["dist"]) == pytest.approx(floor, rel=0.25)
+    assert float(stats["inv"]) == pytest.approx(0.0, abs=1e-6)
+    # The pooled statistic is what the old loss used; it is far above the floor.
+    assert float(_sigreg(1)(identical.reshape(-1, DIM))) > 4 * floor

@@ -1,7 +1,8 @@
 """Variant A (LeJEPA): `(1 - lambda) * invariance + lambda * SIGReg`.
 
-Balestriero & LeCun, arXiv:2511.08544. SIGReg is applied to the concatenation of
-all views in the batch.
+Balestriero & LeCun, arXiv:2511.08544. SIGReg is computed per view (N is the
+per-view batch size) and averaged over views, as in the paper and the official
+implementation; the views are not pooled into one sample.
 """
 
 import torch
@@ -48,11 +49,11 @@ class LeJEPALoss:
 
         Returns:
             The fp32 scalar loss and detached diagnostics: `inv`, `dist` (SIGReg),
-            `total` and `kappa` (on all views concatenated).
+            `total` and `kappa` (on all views concatenated; `dist` is per view).
         """
         flat = batch.z.reshape(-1, batch.z.shape[-1])
         inv = invariance.invariance_loss(batch)
-        dist = self.sigreg(flat)
+        dist = self.sigreg(batch.z)
         total = (1.0 - self.lambda_) * inv + self.lambda_ * dist
         stats = {
             "inv": inv.detach(),
