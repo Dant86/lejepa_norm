@@ -1,6 +1,11 @@
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
-"""Multi-view augmentation for joint-embedding pretraining.
+"""Multi-view augmentation on PIL images: the REFERENCE implementation.
+
+Training and embedding use the batched GPU pipeline in `data.gpu_views`; this
+torchvision/PIL version is kept as the reference it is tested against (see
+`research_notes/gpu_augmentation/`). Both read their parameters from
+`data.view_spec`.
 
 Every view is a random resized crop + horizontal flip + color jitter
 (0.4, 0.4, 0.2, 0.1; p=0.8) + random grayscale (p=0.2). Global views are 96px with
@@ -18,35 +23,35 @@ import torchvision.transforms as transforms
 import torchvision.transforms.functional as transforms_functional
 
 from lejepa_norm import config
-
-COLOR_JITTER = (0.4, 0.4, 0.2, 0.1)
-COLOR_JITTER_P = 0.8
-GRAYSCALE_P = 0.2
-BLUR_P = 0.5
-BLUR_SIGMA = (0.1, 2.0)
+from lejepa_norm.data import view_spec
 
 
 def _view_transform(
-    size: int, scale: tuple[float, float], blur: bool, cfg: config.DataConfig
+    spec: view_spec.ViewSpec, cfg: config.DataConfig
 ) -> transforms.Compose:
     ops: list[torch.nn.Module] = [
         transforms.RandomResizedCrop(
-            size,
-            scale=scale,
+            spec.size,
+            scale=spec.scale,
+            ratio=view_spec.CROP_RATIO,
             interpolation=transforms.InterpolationMode.BICUBIC,
         ),
-        transforms.RandomHorizontalFlip(),
+        transforms.RandomHorizontalFlip(p=view_spec.FLIP_P),
         transforms.RandomApply(
-            [transforms.ColorJitter(*COLOR_JITTER)], p=COLOR_JITTER_P
+            [transforms.ColorJitter(*view_spec.COLOR_JITTER)],
+            p=view_spec.COLOR_JITTER_P,
         ),
-        transforms.RandomGrayscale(p=GRAYSCALE_P),
+        transforms.RandomGrayscale(p=view_spec.GRAYSCALE_P),
     ]
-    if blur:
-        # Odd kernel of about 10% of the image side, as in SimCLR.
-        kernel = 2 * (size // 20) + 1
+    if spec.blur:
         ops.append(
             transforms.RandomApply(
-                [transforms.GaussianBlur(kernel, sigma=BLUR_SIGMA)], p=BLUR_P
+                [
+                    transforms.GaussianBlur(
+                        spec.blur_kernel_size, sigma=view_spec.BLUR_SIGMA
+                    )
+                ],
+                p=view_spec.BLUR_P,
             )
         )
     return transforms.Compose(
@@ -65,12 +70,8 @@ class MultiViewTransform:
         """Builds the global and local pipelines from `cfg`."""
         self.num_global_views = cfg.num_global_views
         self.num_local_views = cfg.num_local_views
-        self._global = _view_transform(
-            cfg.global_size, cfg.global_scale, blur=True, cfg=cfg
-        )
-        self._local = _view_transform(
-            cfg.local_size, cfg.local_scale, blur=False, cfg=cfg
-        )
+        self._global = _view_transform(view_spec.global_spec(cfg), cfg)
+        self._local = _view_transform(view_spec.local_spec(cfg), cfg)
 
     def __call__(self, image: object) -> list[torch.Tensor]:
         """Generates all views of `image` (a PIL image)."""
@@ -92,9 +93,7 @@ class AugmentedViewTransform:
 
     def __init__(self, cfg: config.DataConfig) -> None:
         """Builds the global-view pipeline from `cfg`."""
-        self._global = _view_transform(
-            cfg.global_size, cfg.global_scale, blur=True, cfg=cfg
-        )
+        self._global = _view_transform(view_spec.global_spec(cfg), cfg)
 
     def __call__(self, image: object) -> torch.Tensor:
         """Returns one augmented global view of `image` (a PIL image)."""

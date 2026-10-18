@@ -1,8 +1,9 @@
 """Online k-NN monitor: cosine k-NN accuracy on STL-10 `test` during training.
 
 The bank is STL-10 `train` and the queries are STL-10 `test`, both un-augmented
-(`CenterTransform`). Features are the backbone output `h` and the projector
-output `z`; classification uses `lejepa_norm.eval.downstream.knn_votes`.
+(`data.gpu_views.center_view`, computed on the device from uint8 batches).
+Features are the backbone output `h` and the projector output `z`;
+classification uses `lejepa_norm.eval.downstream.knn_votes`.
 """
 
 import os
@@ -11,61 +12,58 @@ import numpy
 import numpy.typing
 import torch
 from torch import nn
-import torch.utils.data
 
 from lejepa_norm import config
+from lejepa_norm.data import batches
 from lejepa_norm.data import datasets
-from lejepa_norm.data import views
+from lejepa_norm.data import gpu_views
 from lejepa_norm.eval import downstream
-from lejepa_norm.train import resume
 
 FloatArray = numpy.typing.NDArray[numpy.float32]
 IntArray = numpy.typing.NDArray[numpy.int64]
-
-
-def _worker_init(worker_id: int) -> None:
-    del worker_id
-    resume.ignore_preemption_signal()
 
 
 @torch.no_grad()
 def extract(
     backbone: nn.Module,
     projector: nn.Module,
-    loader: torch.utils.data.DataLoader[tuple[torch.Tensor, int]],
+    images: numpy.ndarray,
+    cfg: config.ExperimentConfig,
     device: torch.device,
-    autocast: bool,
-) -> tuple[FloatArray, FloatArray, IntArray]:
-    """Runs the models in eval mode over `loader`.
+) -> tuple[FloatArray, FloatArray]:
+    """Runs the models in eval mode over the center views of uint8 `images`.
 
     The modules are put back into their previous (train/eval) mode afterwards.
 
+    Args:
+        backbone: Backbone on `device`.
+        projector: Projector on `device`.
+        images: uint8 `(N, H, W, 3)`.
+        cfg: `data` (normalization), `eval.batch_size` and `train.precision` are
+            used.
+        device: Device the models live on.
+
     Returns:
-        `(h, z, labels)` as float32 / int64 arrays.
+        `(h, z)` as float32 arrays.
     """
+    autocast = cfg.train.precision == "bf16"
     modes = (backbone.training, projector.training)
     backbone.eval()
     projector.eval()
     hs: list[torch.Tensor] = []
     zs: list[torch.Tensor] = []
-    labels: list[torch.Tensor] = []
     try:
-        for images, label in loader:
-            images = images.to(device, non_blocking=True)
+        for batch in batches.contiguous_batches(images, cfg.eval.batch_size, device):
+            view = gpu_views.center_view(batch, cfg.data)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=autocast):
-                h = backbone(images)
+                h = backbone(view)
                 z = projector(h)
             hs.append(h.float().cpu())
             zs.append(z.float().cpu())
-            labels.append(label)
     finally:
         backbone.train(modes[0])
         projector.train(modes[1])
-    return (
-        torch.cat(hs).numpy(),
-        torch.cat(zs).numpy(),
-        torch.cat(labels).numpy().astype(numpy.int64),
-    )
+    return torch.cat(hs).numpy(), torch.cat(zs).numpy()
 
 
 class OnlineKnn:
@@ -81,34 +79,29 @@ class OnlineKnn:
 
         Args:
             data_dir: Prepared data root (`LEJEPA_NORM_DATA_DIR`).
-            cfg: Experiment config; `data` (normalization, workers),
-                `eval.batch_size`, `eval.knn_k` and `train.precision` are used.
+            cfg: Experiment config; `data` (normalization), `eval.batch_size`,
+                `eval.knn_k` and `train.precision` are used.
             device: Device the models live on.
         """
-        transform = views.CenterTransform(cfg.data)
+        self._cfg = cfg
         self._device = device
-        self._autocast = cfg.train.precision == "bf16"
         self._k = cfg.eval.knn_k
-        self._loaders = {
-            split: torch.utils.data.DataLoader(
-                datasets.load_split(data_dir, "stl10", split, transform),
-                batch_size=cfg.eval.batch_size,
-                shuffle=False,
-                num_workers=cfg.data.num_workers,
-                pin_memory=device.type == "cuda",
-                worker_init_fn=_worker_init,
-            )
+        self._splits: dict[str, datasets.ImageArrayDataset[object]] = {
+            split: datasets.load_split(data_dir, "stl10", split)
             for split in ("train", "test")
         }
 
     def __call__(self, backbone: nn.Module, projector: nn.Module) -> dict[str, float]:
         """Returns `{"knn_acc_h": ..., "knn_acc_z": ...}` on STL-10 `test`."""
-        bank_h, bank_z, bank_y = extract(
-            backbone, projector, self._loaders["train"], self._device, self._autocast
+        bank_set, query_set = self._splits["train"], self._splits["test"]
+        bank_h, bank_z = extract(
+            backbone, projector, bank_set.images, self._cfg, self._device
         )
-        query_h, query_z, query_y = extract(
-            backbone, projector, self._loaders["test"], self._device, self._autocast
+        query_h, query_z = extract(
+            backbone, projector, query_set.images, self._cfg, self._device
         )
+        bank_y = bank_set.labels.astype(numpy.int64)
+        query_y = query_set.labels.astype(numpy.int64)
         num_classes = int(max(bank_y.max(), query_y.max())) + 1
         out: dict[str, float] = {}
         for name, bank, query in (("h", bank_h, query_h), ("z", bank_z, query_z)):

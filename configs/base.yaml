@@ -8,7 +8,7 @@ data:
   local_size: 48
   global_scale: [0.3, 1.0]
   local_scale: [0.05, 0.3]
-  num_workers: 8
+  num_workers: 8  # prepare_data build only; train/embed augment on the GPU
   mean: [0.4409, 0.4279, 0.3868]
   std: [0.2683, 0.2610, 0.2687]
   corruptions:

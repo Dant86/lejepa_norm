@@ -165,7 +165,7 @@ def test_build_creates_layout_and_corruptions(
     assert [tuple(v.shape) for v in item] == [(3, 96, 96)] * 2 + [(3, 48, 48)] * 4
     corrupted = datasets.load_corrupted(tmp_path, "pixelate", 3)
     assert len(corrupted) == STL_SIZES["test"]
-    assert len(datasets.load_pretraining(tmp_path)) == 10
+    assert len(datasets.load_pretraining_images(tmp_path)) == 10
 
 
 def test_corruption_deterministic_and_shape_preserving() -> None:

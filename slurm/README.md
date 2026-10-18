@@ -81,8 +81,12 @@ What each app does when it receives `USR1`:
   order (per-epoch seeded shuffle, skipped forward) and the same LR schedule
   (a function of the global step). When the run finishes, `resume.pt` is replaced
   by a small "complete" marker, so resubmitting a finished run exits 0
-  immediately. Augmentation randomness is reproduced exactly only with
-  `data.num_workers=0`.
+  immediately. Augmentation runs on the GPU from one seeded generator whose
+  state is saved in `resume.pt`, so the resumed run sees exactly the same
+  augmented views as an uninterrupted one, whatever `data.num_workers` is
+  (training and embedding ignore it; only `prepare_data build` uses it). On CPU
+  the resumed run is bit-identical; on CUDA, non-deterministic kernels (cuDNN
+  benchmark mode) can still cause float-level differences.
 - **embed**, **prepare_data build**, **analyze**: no handler; the process dies
   and the requeued job re-runs it. Embedding shards and prepared arrays are
   written atomically (temp file + rename), so the rerun skips completed work

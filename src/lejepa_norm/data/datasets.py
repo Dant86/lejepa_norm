@@ -5,7 +5,9 @@ cheaper, but on the cluster's network filesystem each random read of a ~27 KB im
 cost ~100 ms (measured with `scripts/bench_data.py`: 83 images/s through a
 DataLoader vs. 1200 images/s from RAM). A sequential read of the whole array is fast
 (~11 s for STL-10 `unlabeled`), and forked DataLoader workers share the array
-copy-on-write, so memory is not multiplied. Pass `in_memory=False` for a read-only
+copy-on-write, so memory is not multiplied. (Training and embedding no longer use
+DataLoader workers: they gather uint8 batches and augment on the device, see
+`data.batches` and `data.gpu_views`.) Pass `in_memory=False` for a read-only
 memory map, e.g. for arrays too large for RAM.
 """
 
@@ -18,6 +20,7 @@ import numpy as np
 import PIL.Image
 import torch.utils.data
 
+from lejepa_norm.data import batches
 from lejepa_norm.data import layout
 
 
@@ -89,15 +92,17 @@ def load_corrupted[T](
     )
 
 
-def load_pretraining[T](
-    data_dir: str | os.PathLike[str],
-    transform: collections.abc.Callable[[PIL.Image.Image], T] | None = None,
-    in_memory: bool = True,
-) -> torch.utils.data.ConcatDataset[tuple[T, int]]:
-    """STL-10 `unlabeled` + `train` (labels present but unused in pretraining)."""
-    return torch.utils.data.ConcatDataset(
+def load_pretraining_images(
+    data_dir: str | os.PathLike[str], in_memory: bool = True
+) -> batches.ArrayConcat:
+    """STL-10 `unlabeled` + `train` images as one uint8 index space (no copy).
+
+    Indices `0..N_unlabeled-1` are `unlabeled`, the rest `train`. Labels are not
+    needed for pretraining.
+    """
+    return batches.ArrayConcat(
         [
-            load_split(data_dir, "stl10", "unlabeled", transform, in_memory),
-            load_split(data_dir, "stl10", "train", transform, in_memory),
+            _load_images(layout.images_path(data_dir, "stl10", split), in_memory)
+            for split in ("unlabeled", "train")
         ]
     )

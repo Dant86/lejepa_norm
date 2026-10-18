@@ -253,11 +253,10 @@ def test_interrupted_training_resumes_like_an_uninterrupted_run(
     expected_lr = [schedule.lr_at(s, peak, 5, 10) for s in range(10)]
     assert [r["lr"] for r in steps] == pytest.approx(expected_lr)
     assert [r["lr"] for r in ref_steps] == pytest.approx(expected_lr)
-    # Same data order, optimizer state and (num_workers=0) RNG: the resumed run
-    # reproduces the uninterrupted one.
+    # Same data order, optimizer state, global RNG and augmentation generator
+    # state: the resumed run reproduces the uninterrupted one exactly.
     for key in ("loss_total", "z_norm_mean"):
-        got = [r[key] for r in steps]
-        assert got == pytest.approx([r[key] for r in ref_steps], rel=1e-4), key
+        assert [r[key] for r in steps] == [r[key] for r in ref_steps], key
 
     final = checkpoint.load(run_dir / loop.LAST_CHECKPOINT)
     ref_final = checkpoint.load(ref_dir / loop.LAST_CHECKPOINT)
@@ -267,7 +266,7 @@ def test_interrupted_training_resumes_like_an_uninterrupted_run(
         ref_final.backbone.state_dict().values(),
         strict=True,
     ):
-        torch.testing.assert_close(got, want, rtol=1e-3, atol=1e-4)
+        torch.testing.assert_close(got, want, rtol=0, atol=0)
     assert resume.load(run_dir / resume.RESUME_FILE).complete
 
     # Resubmitting a finished run is a no-op.
@@ -275,6 +274,28 @@ def test_interrupted_training_resumes_like_an_uninterrupted_run(
     assert app.main([*_train_argv(*RESUME_RUN), "--resume", "auto"]) == 0
     assert "nothing to do" in capsys.readouterr().out
     assert runlog.read_metrics(run_dir / runlog.METRICS_FILE) == records
+
+
+def test_training_does_not_depend_on_num_workers(env: pathlib.Path) -> None:
+    """Augmentation runs on the device from one seeded generator, not in workers."""
+    app = _load_app()
+    results: list[tuple[list[dict[str, float]], dict[str, torch.Tensor]]] = []
+    for workers in (0, 3):
+        argv = ["--run-name", f"w{workers}", "--env-file", os.devnull]
+        for item in (*TINY, "train.epochs=2", f"data.num_workers={workers}"):
+            argv += ["--set", item]
+        assert app.main(argv) == 0
+        run_dir = env / "runs" / f"w{workers}"
+        records = [
+            {k: v for k, v in r.items() if k not in ("images_per_s", "epoch_time_s")}
+            for r in runlog.read_metrics(run_dir / runlog.METRICS_FILE)
+        ]
+        weights = checkpoint.load(run_dir / loop.LAST_CHECKPOINT).backbone.state_dict()
+        results.append((records, weights))
+    (records_a, weights_a), (records_b, weights_b) = results
+    assert records_a == records_b
+    for name, value in weights_a.items():
+        torch.testing.assert_close(value, weights_b[name], rtol=0, atol=0)
 
 
 def test_resume_auto_refuses_a_run_without_resume_state(env: pathlib.Path) -> None:
