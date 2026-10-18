@@ -1,8 +1,12 @@
 """End-to-end: fake checkpoint + fake prepared data -> apps/embed.py -> dumps."""
 
+import collections.abc
+import gc
 import importlib.util
 import pathlib
 import types
+import typing
+import weakref
 
 import numpy
 import PIL.Image
@@ -328,3 +332,25 @@ def test_embed_resume_writes_only_missing_shards(workspace: pathlib.Path) -> Non
     )
     with pytest.raises(ValueError, match="different job"):
         embed(RUN, resume=True)
+
+
+def test_stl10c_arrays_are_loaded_one_at_a_time(
+    workspace: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Arrays are read into RAM, so the 50 STL-10-C arrays must not all be alive."""
+    real = typing.cast(
+        collections.abc.Callable[..., object], embedding.datasets.load_corrupted
+    )
+    refs: list[weakref.ReferenceType[object]] = []
+
+    def spy(*args: object, **kwargs: object) -> object:
+        gc.collect()
+        # At most the previous array (still held by the running loop) may be alive.
+        assert sum(ref() is not None for ref in refs) <= 1
+        dataset = real(*args, **kwargs)
+        refs.append(weakref.ref(dataset))
+        return dataset
+
+    monkeypatch.setattr(embedding.datasets, "load_corrupted", spy)
+    assert _run(workspace, "--sets", "stl10c", "--overwrite") == 0
+    assert len(refs) == sum(len(v) for v in CORRUPTIONS.values())
