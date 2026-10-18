@@ -82,6 +82,25 @@ class MultiViewTransform:
         return out
 
 
+class AugmentedViewTransform:
+    """One random global-view augmentation: PIL image to `(3, G, G)` tensor.
+
+    The same pipeline `MultiViewTransform` uses for its global views (crop, flip,
+    color jitter, grayscale, blur, normalization). Each call draws fresh
+    randomness from torch's global RNG.
+    """
+
+    def __init__(self, cfg: config.DataConfig) -> None:
+        """Builds the global-view pipeline from `cfg`."""
+        self._global = _view_transform(
+            cfg.global_size, cfg.global_scale, blur=True, cfg=cfg
+        )
+
+    def __call__(self, image: object) -> torch.Tensor:
+        """Returns one augmented global view of `image` (a PIL image)."""
+        return typing.cast(torch.Tensor, self._global(image))
+
+
 class CenterTransform:
     """Un-augmented view: PIL image to a normalized float tensor `(3, H, W)`."""
 
