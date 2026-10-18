@@ -1,0 +1,30 @@
+lejepa_norm.data.corruptions
+============================
+
+`functions.py` is derived from the `imagecorruptions` package, version 1.1.2
+(https://github.com/bethgelab/imagecorruptions, Apache License 2.0), by
+Evgenia Rusak and Benjamin Mitzkus (Bethge Lab). That package is itself a
+pip-installable port of the corruption code released with
+
+  Dan Hendrycks and Thomas Dietterich. "Benchmarking Neural Network Robustness
+  to Common Corruptions and Perturbations." ICLR 2019.
+  https://arxiv.org/abs/1903.12261
+  https://github.com/hendrycks/robustness
+
+The full Apache License 2.0 text is in the LICENSE file next to this notice.
+
+Modifications made for this project (Apache License 2.0, section 4(b)):
+
+  * `skimage.filters.gaussian(..., multichannel=True)` replaced by
+    `channel_axis=-1` (the old keyword was removed from scikit-image).
+  * Global `np.random` state replaced by an explicit `numpy.random.Generator`
+    argument so every corruption is deterministic for a given seed.
+  * OpenCV (`cv2`) dependency removed: the disk kernel, defocus filter and
+    RGB-to-gray conversion use scipy / numpy equivalents.
+  * Removed NumPy 2 / SciPy incompatibilities (`np.float_`,
+    `scipy.ndimage.interpolation`) and the `pkg_resources` import.
+  * Grayscale-input branches were dropped (inputs are always RGB).
+  * `frost` and `spatter` were not vendored (they need bundled texture images
+    and OpenCV image-processing routines respectively).
+  * Corruptions are called through `corrupt()` in `__init__.py`, which takes
+    and returns `uint8` RGB arrays.
