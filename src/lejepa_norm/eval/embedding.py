@@ -79,28 +79,30 @@ def _sources(
     eval_set: str,
     data_dir: str | os.PathLike[str],
     transform: collections.abc.Callable[[object], torch.Tensor],
-) -> list[_Source]:
-    def split(dataset: str, name: str) -> list[_Source]:
-        return [_Source(datasets.load_split(data_dir, dataset, name, transform), "", 0)]
+) -> collections.abc.Iterator[_Source]:
+    """Yields the image arrays of `eval_set`, loading each only when it is reached.
 
-    if eval_set == dumps.STL10_TRAIN:
-        return split("stl10", "train")
-    if eval_set == dumps.STL10_TEST:
-        return split("stl10", "test")
-    if eval_set == dumps.DTD_TEST:
-        return split("dtd", "test")
-    if eval_set == dumps.SVHN_TEST:
-        return split("svhn", "test")
-    if eval_set == dumps.STL10_C:
-        return [
-            _Source(
+    Arrays are read into RAM (see `data.datasets`), so STL-10-C (50 arrays of about
+    220 MB) must not be materialized all at once.
+    """
+    splits = {
+        dumps.STL10_TRAIN: ("stl10", "train"),
+        dumps.STL10_TEST: ("stl10", "test"),
+        dumps.DTD_TEST: ("dtd", "test"),
+        dumps.SVHN_TEST: ("svhn", "test"),
+    }
+    if eval_set in splits:
+        dataset, name = splits[eval_set]
+        yield _Source(datasets.load_split(data_dir, dataset, name, transform), "", 0)
+    elif eval_set == dumps.STL10_C:
+        for name, severity in stl10c_variants(data_dir):
+            yield _Source(
                 datasets.load_corrupted(data_dir, name, severity, transform),
                 name,
                 severity,
             )
-            for name, severity in stl10c_variants(data_dir)
-        ]
-    raise ValueError(f"unknown eval set {eval_set!r}; expected {dumps.EVAL_SETS}")
+    else:
+        raise ValueError(f"unknown eval set {eval_set!r}; expected {dumps.EVAL_SETS}")
 
 
 def _shard_seed(seed: int, *key: object) -> int:
