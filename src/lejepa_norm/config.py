@@ -1,6 +1,6 @@
 """Typed experiment configs: dataclasses loaded from YAML with CLI overrides.
 
-Configs live in `configs/*.yaml`. typing.Any field can be overridden with a dotted path,
+Configs live in `configs/*.yaml`. Any field can be overridden with a dotted path,
 e.g. `--set train.lr=1e-3`; override values are parsed as YAML. Unknown keys and
 wrongly typed values are errors. The fully resolved config is saved next to every
 run's outputs with `save_resolved`.
@@ -30,6 +30,22 @@ class DataConfig:
     global_scale: tuple[float, float] = (0.3, 1.0)
     local_scale: tuple[float, float] = (0.05, 0.3)
     num_workers: int = 8
+    # STL-10-C generation (apps/prepare_data.py --stage build).
+    corruptions: tuple[str, ...] = (
+        "gaussian_noise",
+        "shot_noise",
+        "impulse_noise",
+        "speckle_noise",
+        "gaussian_blur",
+        "defocus_blur",
+        "contrast",
+        "brightness",
+        "jpeg_compression",
+        "pixelate",
+    )
+    severities: tuple[int, ...] = (1, 2, 3, 4, 5)
+    corruption_seed: int = 0
+    full_corruption_set: bool = False
 
 
 @dataclasses.dataclass
@@ -65,6 +81,16 @@ class TrainConfig:
 
 
 @dataclasses.dataclass
+class EvalConfig:
+    """Embedding dump and analysis settings."""
+
+    num_views: int = 8
+    knn_k: int = 20
+    cv_folds: int = 5
+    num_bootstrap: int = 1000
+
+
+@dataclasses.dataclass
 class ExperimentConfig:
     """Top-level config for one run."""
 
@@ -73,6 +99,7 @@ class ExperimentConfig:
     model: ModelConfig = dataclasses.field(default_factory=ModelConfig)
     loss: LossConfig = dataclasses.field(default_factory=LossConfig)
     train: TrainConfig = dataclasses.field(default_factory=TrainConfig)
+    eval: EvalConfig = dataclasses.field(default_factory=EvalConfig)
 
 
 def _key(field_name: str) -> str:
