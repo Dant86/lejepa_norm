@@ -1,0 +1,28 @@
+# Base config: starting defaults from the technical design (tuned in M2).
+# Per-variant / per-experiment configs override only what differs.
+seed: 0
+data:
+  num_global_views: 2
+  num_local_views: 4
+  global_size: 96
+  local_size: 48
+  global_scale: [0.3, 1.0]
+  local_scale: [0.05, 0.3]
+  num_workers: 8
+model:
+  backbone: resnet18
+  reduced_stem: false
+  projector_hidden: [2048, 2048]
+  embed_dim: 256
+loss:
+  variant: A
+  lambda: 0.05
+  num_slices: 1024
+  num_points: 17
+train:
+  batch_size: 256
+  epochs: 200
+  warmup_epochs: 10
+  lr: 5.0e-4
+  weight_decay: 0.05
+  precision: bf16

@@ -1,0 +1,25 @@
+# Local hooks run through uv so versions come from uv.lock (same as CI and `make check`).
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --check
+        language: system
+        types: [python]
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check
+        language: system
+        types: [python]
+      - id: check-imports
+        name: google-style module imports
+        entry: uv run python scripts/check_imports.py
+        language: system
+        types: [python]
+      - id: pyright
+        name: pyright
+        entry: uv run pyright
+        language: system
+        types: [python]
+        pass_filenames: false
