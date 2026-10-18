@@ -1,4 +1,4 @@
-.PHONY: check format lint imports typecheck test
+.PHONY: check format lint imports typecheck test test-fast
 
 # Everything CI and pre-commit enforce.
 check: lint imports typecheck test
@@ -19,3 +19,7 @@ typecheck:
 
 test:
 	uv run pytest
+
+# Quick local loop: skips the multi-process / headless-Chrome tests (CI runs all).
+test-fast:
+	uv run pytest -m "not slow"

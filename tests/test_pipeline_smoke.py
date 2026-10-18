@@ -12,6 +12,7 @@ import types
 import numpy
 import pytest
 
+import helpers
 from lejepa_norm import paths
 from lejepa_norm.data import layout
 from lejepa_norm.eval import dumps
@@ -32,10 +33,7 @@ SIZES = {
 CORRUPTIONS = {"gaussian_noise": (1, 3), "contrast": (1, 3)}
 
 SMALL_MODEL = (
-    "model.projector_hidden=[32]",
-    "model.embed_dim=16",
-    "loss.num_slices=16",
-    "data.num_workers=0",
+    *helpers.TINY_MODEL,
     "eval.batch_size=8",
     "eval.knn_k=3",
     "eval.num_views=3",
@@ -71,7 +69,12 @@ def _write_fake_data(root: pathlib.Path) -> None:
     rng = numpy.random.default_rng(0)
 
     def images(n: int) -> numpy.ndarray:
-        return rng.integers(0, 256, size=(n, 96, 96, 3), dtype=numpy.uint8)
+        return rng.integers(
+            0,
+            256,
+            size=(n, helpers.IMAGE_SIZE, helpers.IMAGE_SIZE, 3),
+            dtype=numpy.uint8,
+        )
 
     for (dataset, split), n in SIZES.items():
         labels = numpy.arange(n, dtype=numpy.int64) % CLASSES
@@ -107,6 +110,7 @@ def _sets(*settings: str) -> list[str]:
     return [arg for item in settings for arg in ("--set", item)]
 
 
+@pytest.mark.slow
 def test_train_embed_analyze_produces_a_note(workspace: pathlib.Path) -> None:
     base = str(REPO / "configs" / "base.yaml")
     run_dir = workspace / "runs" / RUN

@@ -19,6 +19,7 @@ from lejepa_norm.eval import shards
 from lejepa_norm.models import backbones
 from lejepa_norm.models import checkpoint
 from lejepa_norm.models import projector as projector_lib
+import tiny_backbone
 
 REPO = pathlib.Path(__file__).parent.parent
 RUN = "fake_run"
@@ -67,19 +68,39 @@ def _fake_data(root: pathlib.Path) -> None:
             )
 
 
-@pytest.fixture
-def workspace(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
-    """Fake data, fake checkpoint, and the env vars the app reads."""
-    _fake_data(tmp_path / "data")
+def _save_checkpoint(path: pathlib.Path, model: config.ModelConfig) -> None:
     torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]
-    cfg = config.ExperimentConfig(
-        model=config.ModelConfig(
-            reduced_stem=True, projector_hidden=(16,), embed_dim=D_Z
-        )
-    )
+    cfg = config.ExperimentConfig(model=model)
     backbone, feat_dim = backbones.build_backbone(cfg.model)
     head = projector_lib.build_projector(feat_dim, cfg.model)
-    checkpoint.save(tmp_path / "ckpt.pt", backbone, head, cfg, epoch=1)
+    checkpoint.save(path, backbone, head, cfg, epoch=1)
+
+
+@pytest.fixture(scope="module")
+def shared(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    """Fake prepared data and two checkpoints, built once and only read."""
+    root = tmp_path_factory.mktemp("embed_shared")
+    _fake_data(root / "data")
+    # The cheap test backbone (default for the workflow tests) ...
+    tiny = config.ModelConfig(
+        backbone=tiny_backbone.NAME, projector_hidden=(16,), embed_dim=D_Z
+    )
+    _save_checkpoint(root / "tiny.pt", tiny)
+    # ... and the real production ResNet-18, covered by one end-to-end test.
+    resnet = config.ModelConfig(projector_hidden=(16,), embed_dim=D_Z)
+    _save_checkpoint(root / "resnet.pt", resnet)
+    return root
+
+
+def _make_workspace(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shared: pathlib.Path,
+    checkpoint_name: str,
+) -> pathlib.Path:
+    """Per-test dirs; data and the checkpoint are symlinks to the shared ones."""
+    (tmp_path / "data").symlink_to(shared / "data", target_is_directory=True)
+    (tmp_path / "ckpt.pt").symlink_to(shared / checkpoint_name)
     for var, name in [
         (paths.DATA_DIR_VAR, "data"),
         (paths.RUNS_DIR_VAR, "runs"),
@@ -88,6 +109,22 @@ def workspace(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathli
     ]:
         monkeypatch.setenv(var, str(tmp_path / name))
     return tmp_path
+
+
+@pytest.fixture
+def workspace(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, shared: pathlib.Path
+) -> pathlib.Path:
+    """Workspace with the tiny test backbone."""
+    return _make_workspace(tmp_path, monkeypatch, shared, "tiny.pt")
+
+
+@pytest.fixture
+def resnet_workspace(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, shared: pathlib.Path
+) -> pathlib.Path:
+    """Workspace with the real ResNet-18 checkpoint."""
+    return _make_workspace(tmp_path, monkeypatch, shared, "resnet.pt")
 
 
 def _run(workspace: pathlib.Path, *extra: str) -> int:
@@ -118,8 +155,10 @@ def _dump(workspace: pathlib.Path) -> dict[str, shards.EmbeddingShard]:
 
 
 def test_embed_writes_loadable_dump_with_correct_contents(
-    workspace: pathlib.Path,
+    resnet_workspace: pathlib.Path,
 ) -> None:
+    """Also the one embed test on the real ResNet-18 (production model path)."""
+    workspace = resnet_workspace
     assert _run(workspace) == 0
     dump = _dump(workspace)
     assert set(dump) == set(dumps.EVAL_SETS)

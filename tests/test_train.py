@@ -9,13 +9,12 @@ import subprocess
 import sys
 import types
 
-import numpy
 import pytest
 import torch
 
+import helpers
 from lejepa_norm import config
 from lejepa_norm import paths
-from lejepa_norm.data import layout
 from lejepa_norm.eval import runlog
 from lejepa_norm.losses import batch as batch_lib
 from lejepa_norm.losses import lejepa
@@ -23,15 +22,13 @@ from lejepa_norm.models import checkpoint
 from lejepa_norm.train import loop
 from lejepa_norm.train import resume
 from lejepa_norm.train import schedule
+import tiny_backbone
 
 REPO = pathlib.Path(__file__).parent.parent
 RUN = "smoke"
 # 10 pretraining images at batch size 4 (drop_last) -> 2 steps in one epoch.
 TINY = (
-    "model.projector_hidden=[32]",
-    "model.embed_dim=16",
-    "loss.num_slices=16",
-    "data.num_workers=0",
+    *helpers.TINY_MODEL,
     "train.batch_size=4",
     "train.epochs=1",
     "train.warmup_epochs=1",
@@ -53,29 +50,20 @@ def _load_app() -> types.ModuleType:
     return module
 
 
-def _write_fake_stl10(data_dir: pathlib.Path) -> None:
-    rng = numpy.random.default_rng(0)
-    for split, n in (("unlabeled", 6), ("train", 4), ("test", 4)):
-        images = rng.integers(0, 256, size=(n, 96, 96, 3), dtype=numpy.uint8)
-        labels = numpy.arange(n, dtype=numpy.int64) % 2
-        if split == "unlabeled":
-            labels[:] = -1
-        path = layout.images_path(data_dir, "stl10", split)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        numpy.save(path, images)
-        numpy.save(layout.labels_path(data_dir, "stl10", split), labels)
-
-
 @pytest.fixture
-def env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+def env(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_stl10_dir: pathlib.Path,
+) -> pathlib.Path:
+    """Per-test runs/embed/notes dirs; the (read-only) fake data is shared."""
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(fake_stl10_dir))
     for var, name in (
-        (paths.DATA_DIR_VAR, "data"),
         (paths.RUNS_DIR_VAR, "runs"),
         (paths.EMBED_DIR_VAR, "embed"),
         (paths.NOTES_DIR_VAR, "notes"),
     ):
         monkeypatch.setenv(var, str(tmp_path / name))
-    _write_fake_stl10(tmp_path / "data")
     return tmp_path
 
 
@@ -119,8 +107,8 @@ def test_train_app_writes_metrics_config_and_checkpoints(env: pathlib.Path) -> N
 
     # The trained model still gives a finite, differentiable loss in bf16 autocast.
     ckpt = checkpoint.load(run_dir / loop.LAST_CHECKPOINT)
-    views = [torch.randn(4, 3, 96, 96) for _ in range(2)]
-    views += [torch.randn(4, 3, 48, 48) for _ in range(4)]
+    views = [torch.randn(4, 3, 32, 32) for _ in range(2)]
+    views += [torch.randn(4, 3, 16, 16) for _ in range(4)]
     with torch.autocast("cpu", dtype=torch.bfloat16):
         h, z = loop.forward_views(ckpt.backbone, ckpt.projector, views, 2)
     is_global = torch.arange(6) < 2
@@ -128,7 +116,7 @@ def test_train_app_writes_metrics_config_and_checkpoints(env: pathlib.Path) -> N
         batch_lib.ViewBatch(z.float(), is_global)
     )
     loss.backward()  # pyright: ignore[reportUnknownMemberType]
-    assert h.shape == (24, 512) and z.shape == (6, 4, 16)
+    assert h.shape == (24, tiny_backbone.FEAT_DIM) and z.shape == (6, 4, 16)
     assert torch.isfinite(loss)
     grads = [p.grad for p in ckpt.backbone.parameters()]
     assert all(g is not None and bool(torch.isfinite(g).all()) for g in grads)
@@ -145,6 +133,7 @@ def test_train_app_writes_metrics_config_and_checkpoints(env: pathlib.Path) -> N
 # `schedule.lr_at(step, ...)` with the number of steps already taken.
 _DRIVER = """
 import os, runpy, signal, sys
+import tiny_backbone  # noqa: F401  (registers the test-only backbone; on PYTHONPATH)
 from lejepa_norm.train import schedule
 
 app, mode, stop_at = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -181,6 +170,7 @@ def _run_driver(
     return subprocess.run(
         [sys.executable, str(driver), str(REPO / "apps" / "train.py"), mode]
         + [str(stop_at), *argv, *extra],
+        env={**os.environ, "PYTHONPATH": str(pathlib.Path(__file__).parent)},
         capture_output=True,
         text=True,
         check=False,
@@ -188,6 +178,28 @@ def _run_driver(
     )
 
 
+@pytest.fixture(scope="module")
+def reference_dir(
+    tmp_path_factory: pytest.TempPathFactory, fake_stl10_dir: pathlib.Path
+) -> pathlib.Path:
+    """Run dir of the uninterrupted reference run, shared by the resume cases."""
+    root = tmp_path_factory.mktemp("reference")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(paths.DATA_DIR_VAR, str(fake_stl10_dir))
+        for var, name in (
+            (paths.RUNS_DIR_VAR, "runs"),
+            (paths.EMBED_DIR_VAR, "embed"),
+            (paths.NOTES_DIR_VAR, "notes"),
+        ):
+            mp.setenv(var, str(root / name))
+        argv = ["--run-name", "ref", "--env-file", os.devnull]
+        for item in (*TINY, *RESUME_RUN):
+            argv += ["--set", item]
+        assert _load_app().main(argv) == 0
+    return root / "runs" / "ref"
+
+
+@pytest.mark.slow
 @pytest.mark.parametrize(
     ("mode", "stop_at", "exit_code", "resumed_step"),
     [
@@ -199,14 +211,15 @@ def _run_driver(
     ],
 )
 def test_interrupted_training_resumes_like_an_uninterrupted_run(
-    env: pathlib.Path, mode: str, stop_at: int, exit_code: int, resumed_step: int
+    env: pathlib.Path,
+    reference_dir: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+    stop_at: int,
+    exit_code: int,
+    resumed_step: int,
 ) -> None:
-    app = _load_app()
-    ref_argv = ["--run-name", "ref", "--env-file", os.devnull]
-    for item in (*TINY, *RESUME_RUN):
-        ref_argv += ["--set", item]
-    assert app.main(ref_argv) == 0
-    ref_dir = env / "runs" / "ref"
+    ref_dir = reference_dir
     run_dir = env / "runs" / RUN
 
     first = _run_driver(env, mode, stop_at, RUN)
@@ -217,8 +230,12 @@ def test_interrupted_training_resumes_like_an_uninterrupted_run(
     assert (state.epoch, state.step_in_epoch) == divmod(resumed_step, 5)
 
     # Without --resume a used run directory is still refused.
-    refused = _run_driver(env, "none", -1, RUN)
-    assert refused.returncode == 2 and "already used" in refused.stderr
+    # (In-process: `parser.error` raises SystemExit(2) and prints to stderr.)
+    app = _load_app()
+    with pytest.raises(SystemExit) as refused:
+        app.main(_train_argv(*RESUME_RUN))
+    assert refused.value.code == 2
+    assert "already used" in capsys.readouterr().err
 
     second = _run_driver(env, "none", -1, RUN, "--resume", "auto")
     assert second.returncode == 0, second.stderr
@@ -254,9 +271,9 @@ def test_interrupted_training_resumes_like_an_uninterrupted_run(
     assert resume.load(run_dir / resume.RESUME_FILE).complete
 
     # Resubmitting a finished run is a no-op.
-    again = _run_driver(env, "none", -1, RUN, "--resume", "auto")
-    assert again.returncode == 0, again.stderr
-    assert "nothing to do" in again.stdout
+    # (`apps/train.py` ends with `sys.exit(main())`, so 0 here is exit code 0.)
+    assert app.main([*_train_argv(*RESUME_RUN), "--resume", "auto"]) == 0
+    assert "nothing to do" in capsys.readouterr().out
     assert runlog.read_metrics(run_dir / runlog.METRICS_FILE) == records
 
 

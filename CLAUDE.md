@@ -25,6 +25,10 @@ this file holds the rules every session must follow.
 - If you find yourself modifying several tests (unless intended behavior is
   deliberately changing), fundamental behavior is probably being broken.
 - CI must pass before any feature is merged to master.
+- Workflow tests use the test-only `tiny_cnn` backbone and small views
+  (`tests/helpers.py`); keep the real ResNet-18 covered by at least one test.
+  Multi-process / headless-Chrome tests carry `@pytest.mark.slow`; `make test-fast`
+  (`pytest -m "not slow"`) skips them for a quick local loop. CI runs everything.
 
 **Research hygiene**
 - Every new research question gets its own feature branch and its own name.

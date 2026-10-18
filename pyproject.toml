@@ -74,3 +74,6 @@ include = ["src", "apps", "tests", "scripts"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "slow: multi-process tests (real-signal subprocesses, pipeline smoke); deselect with -m \"not slow\"",
+]

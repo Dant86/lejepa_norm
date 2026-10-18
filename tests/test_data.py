@@ -4,6 +4,7 @@
 
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -92,16 +93,31 @@ def _run_app(
     )
 
 
-def test_build_creates_layout_and_corruptions(tmp_path: pathlib.Path) -> None:
-    stl_images = _write_fake_raw(tmp_path)
-    result = _run_app(
-        tmp_path,
-        "data.corruptions=[gaussian_noise, pixelate]",
-        "data.severities=[1, 3]",
-        "data.corruption_seed=7",
-        "data.num_workers=2",
-    )
+# One stochastic and one deterministic-given-seed corruption, two severities.
+BUILD_OVERRIDES = (
+    "data.corruptions=[gaussian_noise, pixelate]",
+    "data.severities=[1, 3]",
+    "data.corruption_seed=7",
+    "data.num_workers=2",
+)
+
+
+@pytest.fixture(scope="module")
+def built(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[pathlib.Path, dict[str, np.ndarray]]:
+    """A finished `prepare_data --stage build`, run once. Tests must not modify it."""
+    root = tmp_path_factory.mktemp("built")
+    stl_images = _write_fake_raw(root)
+    result = _run_app(root, *BUILD_OVERRIDES)
     assert result.returncode == 0, result.stderr
+    return root, stl_images
+
+
+def test_build_creates_layout_and_corruptions(
+    built: tuple[pathlib.Path, dict[str, np.ndarray]],
+) -> None:
+    tmp_path, stl_images = built
 
     for split, n in STL_SIZES.items():
         images = np.load(layout.images_path(tmp_path, "stl10", split))
@@ -129,15 +145,15 @@ def test_build_creates_layout_and_corruptions(tmp_path: pathlib.Path) -> None:
     for name in ("gaussian_noise", "pixelate"):
         for severity in (1, 3):
             path = layout.corrupted_images_path(tmp_path, name, severity)
-            built = np.load(path)
-            assert built.dtype == np.uint8 and built.shape == test_images.shape
+            array = np.load(path)
+            assert array.dtype == np.uint8 and array.shape == test_images.shape
             expected = np.stack(
                 [
                     corruptions.corrupt(img, name, severity, seed=7, index=i)
                     for i, img in enumerate(test_images)
                 ]
             )
-            np.testing.assert_array_equal(built, expected)
+            np.testing.assert_array_equal(array, expected)
     assert not layout.corrupted_images_path(tmp_path, "fog", 1).exists()
     assert (tmp_path / "stl10c" / "config.resolved.yaml").exists()
 
@@ -212,16 +228,11 @@ def test_views_and_center_view_share_normalization() -> None:
         assert torch.allclose(out, expected.expand_as(out), atol=1e-5)
 
 
-def test_build_resumes_after_interruption(tmp_path: pathlib.Path) -> None:
+def test_build_resumes_after_interruption(
+    built: tuple[pathlib.Path, dict[str, np.ndarray]], tmp_path: pathlib.Path
+) -> None:
     """A rerun completes a killed build and keeps every array it finished."""
-    _write_fake_raw(tmp_path)
-    overrides = (
-        "data.corruptions=[gaussian_noise, pixelate]",
-        "data.severities=[1]",
-        "data.num_workers=1",
-    )
-    first = _run_app(tmp_path, *overrides)
-    assert first.returncode == 0, first.stderr
+    shutil.copytree(built[0], tmp_path, dirs_exist_ok=True)  # finished build
     stl_test = layout.images_path(tmp_path, "stl10", "test")
     noise = layout.corrupted_images_path(tmp_path, "gaussian_noise", 1)
     pixelate = layout.corrupted_images_path(tmp_path, "pixelate", 1)
@@ -235,7 +246,7 @@ def test_build_resumes_after_interruption(tmp_path: pathlib.Path) -> None:
         path.with_name(f"{path.stem}.partial.npy").write_bytes(b"cut off")
     finished = noise.stat().st_mtime_ns
 
-    second = _run_app(tmp_path, *overrides)
+    second = _run_app(tmp_path, *BUILD_OVERRIDES)
     assert second.returncode == 0, second.stderr
     assert noise.stat().st_mtime_ns == finished  # finished arrays are skipped
     for path, array in expected.items():
