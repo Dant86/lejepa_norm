@@ -1,0 +1,66 @@
+[project]
+name = "lejepa-norm"
+version = "0.1.0"
+description = "Studying the role of the embedding radius in LeJEPA."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0",
+    "pyright>=1.1.390",
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lejepa_norm"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+src = ["src", "apps", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "D",   # pydocstyle
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "TID", # tidy imports
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+# Google style: one import per line, modules only (see scripts/check_imports.py).
+force-single-line = true
+force-sort-within-sections = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+include = ["src", "apps", "tests", "scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
