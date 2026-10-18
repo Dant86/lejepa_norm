@@ -42,6 +42,7 @@ graph LR
     AN --> EVAL
     AN --> PLOT
     AN --> REP
+    TRAIN --> CFG
     TRAIN --> DATA
     TRAIN --> MOD
     TRAIN --> LOSS
