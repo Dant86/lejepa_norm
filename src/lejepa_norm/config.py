@@ -30,6 +30,10 @@ class DataConfig:
     global_scale: tuple[float, float] = (0.3, 1.0)
     local_scale: tuple[float, float] = (0.05, 0.3)
     num_workers: int = 8
+    # Per-channel normalization applied as the last step of every view (training and
+    # embedding must agree). Commonly cited STL-10 statistics.
+    mean: tuple[float, float, float] = (0.4467, 0.4398, 0.4066)
+    std: tuple[float, float, float] = (0.2603, 0.2566, 0.2713)
     # STL-10-C generation (apps/prepare_data.py --stage build).
     corruptions: tuple[str, ...] = (
         "gaussian_noise",
@@ -66,6 +70,7 @@ class LossConfig:
     lambda_: float = 0.05
     num_slices: int = 1024
     num_points: int = 17
+    t_max: float = 3.0
 
 
 @dataclasses.dataclass
@@ -78,6 +83,9 @@ class TrainConfig:
     lr: float = 5e-4
     weight_decay: float = 0.05
     precision: typing.Literal["bf16", "fp32"] = "bf16"
+    log_every_steps: int = 50
+    knn_every_epochs: int = 10
+    checkpoint_every_epochs: int = 10
 
 
 @dataclasses.dataclass
@@ -85,6 +93,7 @@ class EvalConfig:
     """Embedding dump and analysis settings."""
 
     num_views: int = 8
+    batch_size: int = 256
     knn_k: int = 20
     cv_folds: int = 5
     num_bootstrap: int = 1000

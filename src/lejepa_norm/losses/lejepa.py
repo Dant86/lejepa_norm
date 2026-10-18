@@ -32,7 +32,10 @@ class LeJEPALoss:
             raise ValueError(f"lambda must be in [0, 1], got {cfg.lambda_}")
         self.lambda_ = cfg.lambda_
         self.sigreg = sigreg.SIGReg(
-            num_slices=cfg.num_slices, num_points=cfg.num_points, generator=generator
+            num_slices=cfg.num_slices,
+            num_points=cfg.num_points,
+            t_max=cfg.t_max,
+            generator=generator,
         )
 
     def __call__(

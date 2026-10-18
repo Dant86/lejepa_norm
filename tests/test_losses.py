@@ -131,3 +131,10 @@ def test_losses_finite_and_differentiable_under_bf16_autocast() -> None:
     (grad,) = torch.autograd.grad(total, layer.weight)
     assert torch.isfinite(grad).all()
     assert float(grad.abs().sum()) > 0
+
+
+def test_loss_config_reaches_sigreg() -> None:
+    cfg = config.LossConfig(num_points=9, num_slices=64, t_max=2.0)
+    loss = lejepa.LeJEPALoss(cfg)
+    assert (loss.sigreg.num_points, loss.sigreg.num_slices) == (9, 64)
+    assert loss.sigreg.t_max == 2.0

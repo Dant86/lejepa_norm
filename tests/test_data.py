@@ -185,11 +185,27 @@ def test_corruption_name_resolution() -> None:
         corruptions.resolve_names(config.DataConfig(corruptions=("nope",)))
 
 
-def test_multiview_values_in_unit_range() -> None:
+def test_multiview_count_dtype_and_normalized_range() -> None:
     image = PIL.Image.fromarray(_random_images(np.random.default_rng(3), 1, 96)[0])  # pyright: ignore[reportUnknownMemberType]
     cfg = config.DataConfig(num_global_views=1, num_local_views=2)
     out = views.MultiViewTransform(cfg)(image)
     assert len(out) == 3
     for view in out:
         assert view.dtype == torch.float32
-        assert 0.0 <= float(view.min()) and float(view.max()) <= 1.0
+        # Normalized [0, 1] pixels lie in [-mean/std, (1-mean)/std] per channel.
+        lo = min(-m / s for m, s in zip(cfg.mean, cfg.std, strict=True))
+        hi = max((1 - m) / s for m, s in zip(cfg.mean, cfg.std, strict=True))
+        assert lo - 1e-4 <= float(view.min()) and float(view.max()) <= hi + 1e-4
+
+
+def test_views_and_center_view_share_normalization() -> None:
+    cfg = config.DataConfig(
+        mean=(0.5, 0.4, 0.3), std=(0.25, 0.2, 0.1), num_local_views=1
+    )
+    # A black image stays exactly black under every augmentation (crop, flip,
+    # jitter, grayscale, blur), so every view must equal -mean / std per channel.
+    image = PIL.Image.fromarray(np.zeros((96, 96, 3), dtype=np.uint8))
+    expected = torch.tensor([-2.0, -2.0, -3.0]).view(3, 1, 1)
+    outputs = [views.CenterTransform(cfg)(image), *views.MultiViewTransform(cfg)(image)]
+    for out in outputs:
+        assert torch.allclose(out, expected.expand_as(out), atol=1e-5)
