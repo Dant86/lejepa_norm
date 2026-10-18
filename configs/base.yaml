@@ -9,6 +9,12 @@ data:
   global_scale: [0.3, 1.0]
   local_scale: [0.05, 0.3]
   num_workers: 8
+  corruptions:
+    [gaussian_noise, shot_noise, impulse_noise, speckle_noise, gaussian_blur,
+     defocus_blur, contrast, brightness, jpeg_compression, pixelate]
+  severities: [1, 2, 3, 4, 5]
+  corruption_seed: 0
+  full_corruption_set: false
 model:
   backbone: resnet18
   reduced_stem: false
@@ -26,3 +32,8 @@ train:
   lr: 5.0e-4
   weight_decay: 0.05
   precision: bf16
+eval:
+  num_views: 8
+  knn_k: 20
+  cv_folds: 5
+  num_bootstrap: 1000
