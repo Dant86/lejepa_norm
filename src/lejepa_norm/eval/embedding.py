@@ -6,10 +6,13 @@ outputs `z` and backbone features `h` are written as `.npz` shards in the layout
 of `eval.dumps`, a few thousand images per shard, so STL-10-C never has to fit in
 memory.
 
-Augmentation randomness is seeded per shard from `(seed, set, corruption,
-severity, first image index)`, so a rerun reproduces every shard exactly,
-independent of `--sets` and `--max-images`. The model runs in eval mode (BatchNorm
-uses running statistics), under `torch.no_grad`, in fp32.
+Views are computed on the device from uint8 batches (`data.gpu_views`; no
+DataLoader workers). Augmentation randomness comes from a device generator seeded
+per shard from `(seed, set, corruption, severity, first image index)`, and the
+parameters of a whole shard are drawn before it is split into batches, so a rerun
+on the same device type reproduces every shard exactly, independent of `--sets`,
+`--max-images`, `eval.batch_size` and `data.num_workers`. The model runs in eval
+mode (BatchNorm uses running statistics), under `torch.no_grad`, in fp32.
 
 Shards are written atomically, so with `resume=True` an interrupted dump (e.g. a
 preempted job) is completed by writing only the shards that are missing; the
@@ -25,12 +28,13 @@ import zlib
 import numpy
 import torch
 from torch import nn
-import torch.utils.data
 
 from lejepa_norm import config
+from lejepa_norm.data import batches
 from lejepa_norm.data import datasets
+from lejepa_norm.data import gpu_views
 from lejepa_norm.data import layout
-from lejepa_norm.data import views
+from lejepa_norm.data import view_spec
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import shards
 from lejepa_norm.models import checkpoint
@@ -38,27 +42,11 @@ from lejepa_norm.models import checkpoint
 SHARD_SIZE = 4096
 
 
-class StackedViews:
-    """Center view followed by `num_views` augmentations: `(K + 1, 3, H, W)`."""
-
-    def __init__(self, cfg: config.DataConfig, num_views: int) -> None:
-        """Builds the center and augmentation pipelines from `cfg`."""
-        self._center = views.CenterTransform(cfg)
-        self._augment = views.AugmentedViewTransform(cfg)
-        self._num_views = num_views
-
-    def __call__(self, image: object) -> torch.Tensor:
-        """Returns the views of `image` (a PIL image), center view first."""
-        out = [self._center(image)]
-        out += [self._augment(image) for _ in range(self._num_views)]
-        return torch.stack(out)
-
-
 @dataclasses.dataclass
 class _Source:
     """One image array of an evaluation set."""
 
-    dataset: datasets.ImageArrayDataset[torch.Tensor]
+    dataset: datasets.ImageArrayDataset[object]
     corruption: str
     severity: int
 
@@ -76,9 +64,7 @@ def stl10c_variants(data_dir: str | os.PathLike[str]) -> list[tuple[str, int]]:
 
 
 def _sources(
-    eval_set: str,
-    data_dir: str | os.PathLike[str],
-    transform: collections.abc.Callable[[object], torch.Tensor],
+    eval_set: str, data_dir: str | os.PathLike[str]
 ) -> collections.abc.Iterator[_Source]:
     """Yields the image arrays of `eval_set`, loading each only when it is reached.
 
@@ -93,11 +79,11 @@ def _sources(
     }
     if eval_set in splits:
         dataset, name = splits[eval_set]
-        yield _Source(datasets.load_split(data_dir, dataset, name, transform), "", 0)
+        yield _Source(datasets.load_split(data_dir, dataset, name), "", 0)
     elif eval_set == dumps.STL10_C:
         for name, severity in stl10c_variants(data_dir):
             yield _Source(
-                datasets.load_corrupted(data_dir, name, severity, transform),
+                datasets.load_corrupted(data_dir, name, severity),
                 name,
                 severity,
             )
@@ -110,23 +96,49 @@ def _shard_seed(seed: int, *key: object) -> int:
 
 
 @torch.no_grad()
-def _embed_views(
+def _embed_shard(
     backbone: nn.Module,
     projector: nn.Module,
-    images: torch.Tensor,
+    images: numpy.ndarray,
+    index: range,
+    data_cfg: config.DataConfig,
+    num_views: int,
     batch_size: int,
-    device: torch.device,
+    generator: torch.Generator,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Embeds `images` `(N, V, 3, H, W)`; returns `z (N, V, d_z)`, `h (N, V, d_h)`."""
-    n, v = images.shape[:2]
-    flat = images.reshape(n * v, *images.shape[2:])
+    """Embeds the center view and `num_views` augmentations of `images[index]`.
+
+    The augmentation parameters of all images are drawn up front (view by view),
+    so the result does not depend on `batch_size`.
+
+    Returns:
+        `z (N, K + 1, d_z)` and `h (N, K + 1, d_h)` on the CPU, center view first.
+    """
+    device = generator.device
+    spec = view_spec.global_spec(data_cfg)
+    height, width = images.shape[1:3]
+    params = [
+        gpu_views.sample_params(spec, len(index), height, width, generator)
+        for _ in range(num_views)
+    ]
     zs: list[torch.Tensor] = []
     hs: list[torch.Tensor] = []
-    for start in range(0, n * v, batch_size):
-        h = backbone(flat[start : start + batch_size].to(device))
-        zs.append(projector(h).float().cpu())
+    offset = 0
+    for batch in batches.contiguous_batches(
+        images, batch_size, device, index.start, index.stop
+    ):
+        rows = slice(offset, offset + batch.shape[0])
+        offset += batch.shape[0]
+        x = gpu_views.to_float(batch)
+        view_list = [gpu_views.normalize(x, data_cfg)]
+        view_list += [
+            gpu_views.apply_view(x, p.select(rows), spec, data_cfg) for p in params
+        ]
+        h = torch.stack([backbone(view) for view in view_list], dim=1)  # (b, V, d)
+        z = projector(h.flatten(0, 1)).reshape(*h.shape[:2], -1)
+        zs.append(z.float().cpu())
         hs.append(h.float().cpu())
-    return torch.cat(zs).reshape(n, v, -1), torch.cat(hs).reshape(n, v, -1)
+    return torch.cat(zs), torch.cat(hs)
 
 
 def _existing_shards(directory: pathlib.Path) -> list[pathlib.Path]:
@@ -173,7 +185,7 @@ def embed_run(
     """Writes the embedding dump of one checkpoint.
 
     The model, the view geometry and the input normalization come from the
-    checkpoint's own config; `cfg` supplies `seed`, `eval.*` and `data.num_workers`.
+    checkpoint's own config; `cfg` supplies `seed` and `eval.*`.
 
     Args:
         ckpt_path: Checkpoint written by `models.checkpoint.save`.
@@ -220,8 +232,7 @@ def embed_run(
     ckpt = checkpoint.load(ckpt_path)
     backbone = ckpt.backbone.to(device).eval()
     projector = ckpt.projector.to(device).eval()
-    data_cfg = dataclasses.replace(ckpt.cfg.data, num_workers=cfg.data.num_workers)
-    transform = StackedViews(data_cfg, cfg.eval.num_views)
+    data_cfg = ckpt.cfg.data
 
     counts: dict[str, int] = {}
     for name, directory in targets.items():
@@ -233,7 +244,7 @@ def embed_run(
             existing.clear()
         part = 0
         total = 0
-        for source in _sources(name, data_dir, transform):
+        for source in _sources(name, data_dir):
             n = len(source.dataset)
             if max_images is not None:
                 n = min(n, max_images)
@@ -246,37 +257,33 @@ def embed_run(
                     part += 1
                     total += len(index)
                     continue
-                torch.manual_seed(  # pyright: ignore[reportUnknownMemberType]
+                generator = torch.Generator(device=device)
+                generator.manual_seed(
                     _shard_seed(
                         cfg.seed, name, source.corruption, source.severity, start
                     )
                 )
-                loader = torch.utils.data.DataLoader(
-                    torch.utils.data.Subset(source.dataset, index),
-                    batch_size=cfg.eval.batch_size,
-                    shuffle=False,
-                    num_workers=cfg.data.num_workers,
+                z, h = _embed_shard(
+                    backbone,
+                    projector,
+                    source.dataset.images,
+                    index,
+                    data_cfg,
+                    cfg.eval.num_views,
+                    cfg.eval.batch_size,
+                    generator,
                 )
-                z_parts: list[torch.Tensor] = []
-                h_parts: list[torch.Tensor] = []
-                labels: list[torch.Tensor] = []
-                for images, label in loader:
-                    z, h = _embed_views(
-                        backbone, projector, images, cfg.eval.batch_size, device
-                    )
-                    z_parts.append(z)
-                    h_parts.append(h)
-                    labels.append(label)
+                labels = source.dataset.labels[index.start : index.stop]
                 count = len(index)
                 shards.save_shard(
                     path,
                     shards.EmbeddingShard(
-                        z=torch.cat(z_parts).numpy(),
-                        h=torch.cat(h_parts).numpy(),
+                        z=z.numpy(),
+                        h=h.numpy(),
                         image_id=numpy.arange(
                             index.start, index.stop, dtype=numpy.int64
                         ),
-                        label=torch.cat(labels).numpy().astype(numpy.int64),
+                        label=numpy.asarray(labels, dtype=numpy.int64),
                         corruption=numpy.array(
                             [source.corruption] * count, dtype=numpy.str_
                         ),

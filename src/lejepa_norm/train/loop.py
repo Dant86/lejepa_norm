@@ -1,5 +1,12 @@
 """Single-device pretraining loop (Variant A; variant-agnostic via `ViewBatch`).
 
+Data: the STL-10 `unlabeled` + `train` uint8 arrays stay in RAM; each step's
+images are gathered on the CPU by a background thread (`data.batches`), copied
+to the device (pinned, non-blocking) and augmented there by
+`data.gpu_views.MultiViewAugment` with a dedicated device `torch.Generator`
+seeded from `seed`. No DataLoader workers are used, so `data.num_workers` does not
+affect training (results do not depend on the CPU count).
+
 Per step: the global views (all the same resolution) go through the backbone in
 one forward pass and the local views in another; the backbone features `h` of all
 views are concatenated and passed through the projector together, and the
@@ -19,11 +26,12 @@ the end, with `last.pt` always holding the most recent one.
 Preemption and resume (`train.resume`): `resume.pt` is written at the end of every
 epoch and, when the `PreemptionFlag` is set (SIGUSR1), at the next step boundary,
 after which `train` returns with `preempted=True`. A resumed run continues at the
-saved global step: the LR schedule is a function of the global step, and the data
+saved global step: the LR schedule is a function of the global step, the data
 order of each epoch is a permutation seeded by `(seed, epoch)` that is skipped
-forward to the interrupted step. Augmentation randomness is restored exactly only
-with `data.num_workers=0` (the main-process RNG state is saved); with workers it
-is merely reseeded.
+forward to the interrupted step, and the states of the augmentation generator and
+of torch's global RNG (SIGReg directions) are restored, so a resumed run sees the
+same views and directions as an uninterrupted one (bit-identical results on CPU;
+on CUDA, non-deterministic kernels can still differ at float precision).
 """
 
 import dataclasses
@@ -38,11 +46,11 @@ import zlib
 import numpy
 import torch
 from torch import nn
-import torch.utils.data
 
 from lejepa_norm import config
+from lejepa_norm.data import batches
 from lejepa_norm.data import datasets
-from lejepa_norm.data import views
+from lejepa_norm.data import gpu_views
 from lejepa_norm.losses import batch as batch_lib
 from lejepa_norm.losses import diagnostics
 from lejepa_norm.losses import lejepa
@@ -89,41 +97,28 @@ class TrainResult:
     preempted: bool = False
 
 
-class EpochSampler(torch.utils.data.Sampler[int]):
-    """Shuffles with a permutation seeded by `(seed, epoch)`, optionally skipped.
+def epoch_permutation(seed: int, epoch: int, size: int) -> numpy.ndarray:
+    """The image order of `epoch`: a permutation seeded by `(seed, epoch)`.
 
-    The order of an epoch does not depend on how many epochs ran in this process,
-    so a resumed run sees the same order; `set_epoch(epoch, skip_batches)` starts
-    the epoch after its first `skip_batches` batches.
+    It does not depend on how many epochs ran in this process, so a resumed run
+    sees the same order.
     """
+    key = zlib.crc32(f"{seed}/epoch/{epoch}".encode())
+    generator = torch.Generator().manual_seed(key)
+    return torch.randperm(size, generator=generator).numpy()
 
-    def __init__(self, size: int, batch_size: int, seed: int) -> None:
-        """Samples indices `0..size-1` for batches of `batch_size`."""
-        self._size = size
-        self._batch_size = batch_size
-        self._seed = seed
-        self._epoch = 1
-        self._skip = 0
 
-    def set_epoch(self, epoch: int, skip_batches: int = 0) -> None:
-        """Selects the permutation of `epoch` and drops its first batches."""
-        self._epoch = epoch
-        self._skip = skip_batches * self._batch_size
+def augmentation_generator(
+    seed: int, device: torch.device, global_step: int = 0
+) -> torch.Generator:
+    """The device generator that drives all training augmentation.
 
-    def permutation(self, epoch: int) -> list[int]:
-        """The full index order of `epoch`."""
-        key = zlib.crc32(f"{self._seed}/epoch/{epoch}".encode())
-        generator = torch.Generator().manual_seed(key)
-        perm = torch.randperm(self._size, generator=generator)
-        return typing.cast(list[int], perm.tolist())  # pyright: ignore[reportUnknownMemberType]
-
-    def __iter__(self) -> typing.Iterator[int]:
-        """Yields the current epoch's indices after the skipped batches."""
-        return iter(self.permutation(self._epoch)[self._skip :])
-
-    def __len__(self) -> int:
-        """Indices left in the current epoch."""
-        return max(self._size - self._skip, 0)
+    `global_step` > 0 gives an independent stream for resuming from a state that
+    has no saved generator state.
+    """
+    generator = torch.Generator(device=device)
+    generator.manual_seed(zlib.crc32(f"{seed}/augment/{global_step}".encode()))
+    return generator
 
 
 def checkpoint_name(epoch: int) -> str:
@@ -136,15 +131,6 @@ def seed_everything(seed: int) -> None:
     random.seed(seed)
     numpy.random.seed(seed)
     torch.manual_seed(seed)  # pyright: ignore[reportUnknownMemberType]
-
-
-def _seed_worker(worker_id: int) -> None:
-    # torch seeds each worker from the loader generator; derive the others from it.
-    del worker_id
-    resume_lib.ignore_preemption_signal()
-    worker_seed = torch.initial_seed() % 2**32
-    numpy.random.seed(worker_seed)
-    random.seed(worker_seed)
 
 
 def _param_groups(
@@ -276,26 +262,13 @@ def train(
     tc = cfg.train
     autocast = tc.precision == "bf16"
 
-    dataset = datasets.load_pretraining(data_dir, views.MultiViewTransform(cfg.data))
-    sampler = EpochSampler(len(dataset), tc.batch_size, cfg.seed)
-    start_step = 0 if resume is None else resume.global_step
-    # Worker seeds differ between the first launch and each resumed one.
-    loader_seed = zlib.crc32(f"{cfg.seed}/loader/{start_step}".encode())
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=tc.batch_size,
-        sampler=sampler,
-        drop_last=True,
-        num_workers=cfg.data.num_workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=cfg.data.num_workers > 0,
-        worker_init_fn=_seed_worker,
-        generator=torch.Generator().manual_seed(loader_seed),
-    )
-    steps_per_epoch = len(dataset) // tc.batch_size
+    images = datasets.load_pretraining_images(data_dir)
+    augment = gpu_views.MultiViewAugment(cfg.data)
+    aug_generator = augmentation_generator(cfg.seed, device)
+    steps_per_epoch = len(images) // tc.batch_size
     if steps_per_epoch == 0:
         raise ValueError(
-            f"{len(dataset)} pretraining images < batch size {tc.batch_size}"
+            f"{len(images)} pretraining images < batch size {tc.batch_size}"
         )
     total_steps = tc.epochs * steps_per_epoch
     warmup_steps = min(tc.warmup_epochs * steps_per_epoch, total_steps)
@@ -333,6 +306,11 @@ def train(
             torch.set_rng_state(resume.rng_cpu)
         if resume.rng_cuda and device.type == "cuda":
             torch.cuda.set_rng_state_all(resume.rng_cuda)
+        if resume.rng_augment is not None:
+            aug_generator.set_state(resume.rng_augment)
+        else:  # resume state written before GPU augmentation existed
+            aug_generator = augmentation_generator(cfg.seed, device, step)
+            print("resume state has no augmentation RNG state; reseeding it")
         print(f"resuming after step {step} (epoch {start_epoch}, step {skip} of it)")
     elif reuse_run_dir:
         log.truncate(0)
@@ -352,6 +330,7 @@ def train(
             epoch_elapsed_s=elapsed,
             rng_cpu=torch.get_rng_state(),
             rng_cuda=_cuda_rng_states(),
+            rng_augment=aug_generator.get_state(),
         )
 
     last = run_path / LAST_CHECKPOINT
@@ -366,47 +345,58 @@ def train(
             elapsed_before = resume.epoch_elapsed_s
             if resume.epoch_sum is not None:
                 epoch_sum += resume.epoch_sum.to(device)
-        sampler.set_epoch(epoch, epoch_step)
-        for view_list, _ in loader:
-            lr = schedule.lr_at(step, peak_lr, warmup_steps, total_steps)
-            for group in optimizer.param_groups:
-                group["lr"] = lr
-            view_list = [v.to(device, non_blocking=True) for v in view_list]
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=autocast):
-                h, z = forward_views(backbone, projector, view_list, num_global)
-            loss, loss_stats = loss_fn(batch_lib.ViewBatch(z.float(), is_global))
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()  # pyright: ignore[reportUnknownMemberType]
-            optimizer.step()  # pyright: ignore[reportUnknownMemberType]
-            step += 1
-            epoch_step += 1
-            interval_steps += 1
-            stats = _step_stats(h, z, loss_stats)
-            epoch_sum += stats
-            if step == 1 or step % tc.log_every_steps == 0:
-                record = _as_record(stats)  # syncs with the device
-                if not math.isfinite(record["loss_total"]):
-                    raise FloatingPointError(f"non-finite loss at step {step}")
-                now = time.perf_counter()
-                log.write(
-                    {
-                        "kind": "step",
-                        "step": step,
-                        "epoch": epoch,
-                        "lr": lr,
-                        **record,
-                        "images_per_s": interval_steps
-                        * tc.batch_size
-                        / (now - interval_start),
-                    }
-                )
-                interval_start, interval_steps = now, 0
-            if preempt.requested and epoch_step < steps_per_epoch:
-                elapsed = elapsed_before + time.perf_counter() - epoch_start
-                state = snapshot(epoch - 1, epoch_step, epoch_sum, elapsed)
-                resume_lib.save(resume_path, state)
-                print(f"preemption requested: saved {resume_path} at step {step}")
-                return TrainResult(run_path, last, step, epoch - 1, preempted=True)
+        order = epoch_permutation(cfg.seed, epoch, len(images))
+        index_batches = (
+            order[s * tc.batch_size : (s + 1) * tc.batch_size]
+            for s in range(epoch_step, steps_per_epoch)
+        )
+        prefetcher = batches.Prefetcher(
+            images, index_batches, pin_memory=device.type == "cuda"
+        )
+        with prefetcher:
+            for cpu_batch in prefetcher:
+                lr = schedule.lr_at(step, peak_lr, warmup_steps, total_steps)
+                for group in optimizer.param_groups:
+                    group["lr"] = lr
+                uint8_batch = cpu_batch.to(device, non_blocking=True)
+                view_list = augment(uint8_batch, aug_generator)
+                with torch.autocast(
+                    device.type, dtype=torch.bfloat16, enabled=autocast
+                ):
+                    h, z = forward_views(backbone, projector, view_list, num_global)
+                loss, loss_stats = loss_fn(batch_lib.ViewBatch(z.float(), is_global))
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()  # pyright: ignore[reportUnknownMemberType]
+                optimizer.step()  # pyright: ignore[reportUnknownMemberType]
+                step += 1
+                epoch_step += 1
+                interval_steps += 1
+                stats = _step_stats(h, z, loss_stats)
+                epoch_sum += stats
+                if step == 1 or step % tc.log_every_steps == 0:
+                    record = _as_record(stats)  # syncs with the device
+                    if not math.isfinite(record["loss_total"]):
+                        raise FloatingPointError(f"non-finite loss at step {step}")
+                    now = time.perf_counter()
+                    log.write(
+                        {
+                            "kind": "step",
+                            "step": step,
+                            "epoch": epoch,
+                            "lr": lr,
+                            **record,
+                            "images_per_s": interval_steps
+                            * tc.batch_size
+                            / (now - interval_start),
+                        }
+                    )
+                    interval_start, interval_steps = now, 0
+                if preempt.requested and epoch_step < steps_per_epoch:
+                    elapsed = elapsed_before + time.perf_counter() - epoch_start
+                    state = snapshot(epoch - 1, epoch_step, epoch_sum, elapsed)
+                    resume_lib.save(resume_path, state)
+                    print(f"preemption requested: saved {resume_path} at step {step}")
+                    return TrainResult(run_path, last, step, epoch - 1, preempted=True)
         epoch_time = elapsed_before + time.perf_counter() - epoch_start
         is_last = epoch == tc.epochs
         epoch_record: dict[str, object] = {

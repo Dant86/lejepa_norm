@@ -221,6 +221,21 @@ def test_embed_is_reproducible_and_seed_dependent(workspace: pathlib.Path) -> No
     numpy.testing.assert_array_equal(first.z, again.z)
     numpy.testing.assert_array_equal(first.h, again.h)
 
+    # Views are made on the device from one generator per shard: the number of
+    # workers does not matter at all ...
+    workers = ("--set", "data.num_workers=2")
+    assert _run(workspace, "--sets", "stl10_test", "--overwrite", *workers) == 0
+    rerun = _dump(workspace)["stl10_test"]
+    numpy.testing.assert_array_equal(first.z, rerun.z)
+    numpy.testing.assert_array_equal(first.h, rerun.h)
+    # ... and the shard's parameters are drawn up front, so the batch size only
+    # changes float rounding inside the model.
+    batch = ("--set", "eval.batch_size=3")
+    assert _run(workspace, "--sets", "stl10_test", "--overwrite", *batch) == 0
+    rerun = _dump(workspace)["stl10_test"]
+    numpy.testing.assert_allclose(first.z, rerun.z, rtol=0, atol=1e-5)
+    numpy.testing.assert_allclose(first.h, rerun.h, rtol=0, atol=1e-5)
+
     assert (
         _run(workspace, "--sets", "stl10_test", "--overwrite", "--set", "seed=1") == 0
     )

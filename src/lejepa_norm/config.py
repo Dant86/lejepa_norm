@@ -29,6 +29,10 @@ class DataConfig:
     local_size: int = 48
     global_scale: tuple[float, float] = (0.3, 1.0)
     local_scale: tuple[float, float] = (0.05, 0.3)
+    # Worker processes for `apps/prepare_data.py --stage build` only. Training and
+    # embedding gather uint8 batches in the main process and augment on the device
+    # (`data.gpu_views`), so this field does not affect them (kept so existing
+    # configs and SLURM templates, which pass it, stay valid).
     num_workers: int = 8
     # Per-channel normalization applied as the last step of every view (training and
     # embedding must agree). Computed over STL-10 unlabeled + train with

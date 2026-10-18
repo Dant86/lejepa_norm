@@ -30,7 +30,8 @@ from lejepa_norm import config
 RESUME_FILE = "resume.pt"
 REQUEUE_EXIT_CODE = 99
 FORMAT_VERSION = 1
-# Fields that may differ between the original launch and a resumed one.
+# Fields that may differ between the original launch and a resumed one
+# (`data.num_workers` does not affect training at all).
 _RUNTIME_ONLY = (("data", "num_workers"),)
 
 
@@ -53,6 +54,9 @@ class ResumeState:
         epoch_elapsed_s: Wall time already spent in the interrupted epoch.
         rng_cpu: `torch.get_rng_state()` at the time of saving.
         rng_cuda: `torch.cuda.get_rng_state_all()`, empty without CUDA.
+        rng_augment: State of the augmentation generator
+            (`torch.Generator.get_state()` of the training device's generator);
+            None in files written before device-side augmentation.
     """
 
     config: dict[str, typing.Any]
@@ -67,6 +71,7 @@ class ResumeState:
     epoch_elapsed_s: float = 0.0
     rng_cpu: torch.Tensor | None = None
     rng_cuda: list[torch.Tensor] = dataclasses.field(default_factory=list[torch.Tensor])
+    rng_augment: torch.Tensor | None = None
 
 
 def save(path: str | os.PathLike[str], state: ResumeState) -> None:
