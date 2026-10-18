@@ -47,6 +47,7 @@ graph LR
     TRAIN --> LOSS
     TRAIN --> EVAL
     EVAL --> DATA
+    EVAL --> CFG
     DATA --> CFG
     MOD --> CFG
     LOSS --> CFG

@@ -88,6 +88,8 @@ class EvalConfig:
     knn_k: int = 20
     cv_folds: int = 5
     num_bootstrap: int = 1000
+    # Kernel ridge (redundancy, residuals) runs on at most this many images.
+    max_kernel_images: int = 4000
 
 
 @dataclasses.dataclass
