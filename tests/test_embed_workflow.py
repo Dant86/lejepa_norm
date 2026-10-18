@@ -224,3 +224,68 @@ def test_embed_splits_into_sorted_shards_and_caps_images(
     loaded = dumps.load_set(files[0].parent)
     assert loaded is not None
     assert loaded.image_id.tolist() == list(range(6))
+
+
+def test_embed_resume_writes_only_missing_shards(workspace: pathlib.Path) -> None:
+    # Reference: an uninterrupted dump with several shards per set.
+    def embed(run_name: str, **kwargs: bool) -> dict[str, int]:
+        app_cfg = config.ExperimentConfig()
+        app_cfg.eval.num_views = 2
+        app_cfg.eval.batch_size = 4
+        app_cfg.data.num_workers = 0
+        return embedding.embed_run(
+            workspace / "ckpt.pt",
+            app_cfg,
+            workspace / "data",
+            workspace / "embed",
+            run_name,
+            eval_sets=["stl10_train", "stl10c"],
+            shard_size=3,
+            device=torch.device("cpu"),
+            **kwargs,
+        )
+
+    full = embed("full")
+    full_dir = workspace / "embed" / "full"
+
+    # Interrupted job: some shards are complete, one was cut off mid-write (a
+    # leftover `.partial` file), and the rest were never started.
+    run_dir = workspace / "embed" / RUN
+    kept: dict[pathlib.Path, int] = {}
+    for name, part in (("stl10_train", 0), ("stl10c", 1), ("stl10c", 2)):
+        src = full_dir / name / f"part-{part:05d}.npz"
+        dest = run_dir / name / src.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(src.read_bytes())
+        kept[dest] = dest.stat().st_mtime_ns
+    (run_dir / "stl10c" / "part-00000.npz.partial").write_bytes(b"truncated")
+
+    # Without --resume or --overwrite, existing shards are still an error, and
+    # the two flags cannot be combined.
+    with pytest.raises(FileExistsError):
+        embed(RUN)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        embed(RUN, resume=True, overwrite=True)
+    with pytest.raises(SystemExit):
+        _run(workspace, "--resume", "--overwrite")
+
+    assert embed(RUN, resume=True) == full
+    for path, mtime in kept.items():  # finished shards were not rewritten
+        assert path.stat().st_mtime_ns == mtime
+    for name in ("stl10_train", "stl10c"):
+        want = sorted(p.name for p in (full_dir / name).glob("*.npz"))
+        assert sorted(p.name for p in (run_dir / name).glob("*.npz")) == want
+        for file_name in want:
+            got = shards.load_shard(run_dir / name / file_name)
+            ref = shards.load_shard(full_dir / name / file_name)
+            for field in ("z", "h", "image_id", "label", "corruption", "severity"):
+                numpy.testing.assert_array_equal(
+                    getattr(got, field), getattr(ref, field), err_msg=field
+                )
+
+    # A shard from a different job (here: other images) is not silently kept.
+    (run_dir / "stl10_train" / "part-00001.npz").write_bytes(
+        (full_dir / "stl10_train" / "part-00002.npz").read_bytes()
+    )
+    with pytest.raises(ValueError, match="different job"):
+        embed(RUN, resume=True)

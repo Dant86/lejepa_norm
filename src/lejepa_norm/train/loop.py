@@ -15,6 +15,15 @@ normalization parameters.
 Outputs in `run_dir`: `metrics.jsonl` (see `metrics_log`) and checkpoints in the
 `models.checkpoint` format: `epoch_XXXX.pt` every `checkpoint_every_epochs` and at
 the end, with `last.pt` always holding the most recent one.
+
+Preemption and resume (`train.resume`): `resume.pt` is written at the end of every
+epoch and, when the `PreemptionFlag` is set (SIGUSR1), at the next step boundary,
+after which `train` returns with `preempted=True`. A resumed run continues at the
+saved global step: the LR schedule is a function of the global step, and the data
+order of each epoch is a permutation seeded by `(seed, epoch)` that is skipped
+forward to the interrupted step. Augmentation randomness is restored exactly only
+with `data.num_workers=0` (the main-process RNG state is saved); with workers it
+is merely reseeded.
 """
 
 import dataclasses
@@ -24,6 +33,7 @@ import pathlib
 import random
 import time
 import typing
+import zlib
 
 import numpy
 import torch
@@ -41,6 +51,7 @@ from lejepa_norm.models import checkpoint
 from lejepa_norm.models import projector as projector_lib
 from lejepa_norm.train import metrics_log
 from lejepa_norm.train import online_knn
+from lejepa_norm.train import resume as resume_lib
 from lejepa_norm.train import schedule
 
 LAST_CHECKPOINT = "last.pt"
@@ -67,12 +78,52 @@ class TrainResult:
         last_checkpoint: Path of `last.pt`.
         steps: Optimizer steps taken.
         epochs: Epochs completed.
+        preempted: Training stopped early on a preemption request after saving
+            `resume.pt`; rerun with the resume state to continue.
     """
 
     run_dir: pathlib.Path
     last_checkpoint: pathlib.Path
     steps: int
     epochs: int
+    preempted: bool = False
+
+
+class EpochSampler(torch.utils.data.Sampler[int]):
+    """Shuffles with a permutation seeded by `(seed, epoch)`, optionally skipped.
+
+    The order of an epoch does not depend on how many epochs ran in this process,
+    so a resumed run sees the same order; `set_epoch(epoch, skip_batches)` starts
+    the epoch after its first `skip_batches` batches.
+    """
+
+    def __init__(self, size: int, batch_size: int, seed: int) -> None:
+        """Samples indices `0..size-1` for batches of `batch_size`."""
+        self._size = size
+        self._batch_size = batch_size
+        self._seed = seed
+        self._epoch = 1
+        self._skip = 0
+
+    def set_epoch(self, epoch: int, skip_batches: int = 0) -> None:
+        """Selects the permutation of `epoch` and drops its first batches."""
+        self._epoch = epoch
+        self._skip = skip_batches * self._batch_size
+
+    def permutation(self, epoch: int) -> list[int]:
+        """The full index order of `epoch`."""
+        key = zlib.crc32(f"{self._seed}/epoch/{epoch}".encode())
+        generator = torch.Generator().manual_seed(key)
+        perm = torch.randperm(self._size, generator=generator)
+        return typing.cast(list[int], perm.tolist())  # pyright: ignore[reportUnknownMemberType]
+
+    def __iter__(self) -> typing.Iterator[int]:
+        """Yields the current epoch's indices after the skipped batches."""
+        return iter(self.permutation(self._epoch)[self._skip :])
+
+    def __len__(self) -> int:
+        """Indices left in the current epoch."""
+        return max(self._size - self._skip, 0)
 
 
 def checkpoint_name(epoch: int) -> str:
@@ -90,6 +141,7 @@ def seed_everything(seed: int) -> None:
 def _seed_worker(worker_id: int) -> None:
     # torch seeds each worker from the loader generator; derive the others from it.
     del worker_id
+    resume_lib.ignore_preemption_signal()
     worker_seed = torch.initial_seed() % 2**32
     numpy.random.seed(worker_seed)
     random.seed(worker_seed)
@@ -174,6 +226,10 @@ def train(
     data_dir: str | os.PathLike[str],
     run_dir: str | os.PathLike[str],
     device: torch.device | None = None,
+    *,
+    resume: resume_lib.ResumeState | None = None,
+    reuse_run_dir: bool = False,
+    preempt: resume_lib.PreemptionFlag | None = None,
 ) -> TrainResult:
     """Pretrains a backbone + projector on STL-10 `unlabeled` + `train`.
 
@@ -182,22 +238,37 @@ def train(
         data_dir: Prepared data root (`LEJEPA_NORM_DATA_DIR`).
         run_dir: Output directory for `metrics.jsonl` and checkpoints.
         device: Defaults to CUDA if available, else CPU.
+        resume: Continue from this state (`metrics.jsonl` is truncated to its
+            global step). Must not be a completed state.
+        reuse_run_dir: Without `resume`, start from scratch even if `run_dir`
+            holds a log from an attempt that never saved a resume state (the log
+            is cleared).
+        preempt: When set (by SIGUSR1), save `resume.pt` at the next step
+            boundary and return with `preempted=True`.
 
     Returns:
         Summary with the path of the last checkpoint.
 
     Raises:
-        FileExistsError: `run_dir` already holds a `metrics.jsonl` (resuming is
-            not supported; pick a new run name).
-        ValueError: `train.epochs < 1` or the dataset is smaller than one batch.
+        FileExistsError: `run_dir` already holds a `metrics.jsonl` and neither
+            `resume` nor `reuse_run_dir` is given.
+        ValueError: `train.epochs < 1`, the dataset is smaller than one batch, or
+            `resume` is complete, has a different config or dataset size.
         FloatingPointError: The loss became non-finite.
     """
     if cfg.train.epochs < 1:
         raise ValueError(f"train.epochs must be >= 1, got {cfg.train.epochs}")
+    if resume is not None:
+        if resume.complete:
+            raise ValueError("the resume state marks the run as complete")
+        if not resume_lib.same_run(config.from_dict(resume.config), cfg):
+            raise ValueError("the resume state was saved with a different config")
     run_path = pathlib.Path(run_dir)
     log = metrics_log.MetricsLog(run_path)
-    if log.path.exists():
+    if resume is None and not reuse_run_dir and log.path.exists():
         raise FileExistsError(f"{log.path} exists; use a new run name")
+    preempt = preempt or resume_lib.PreemptionFlag()
+    resume_path = run_path / resume_lib.RESUME_FILE
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -206,18 +277,22 @@ def train(
     autocast = tc.precision == "bf16"
 
     dataset = datasets.load_pretraining(data_dir, views.MultiViewTransform(cfg.data))
+    sampler = EpochSampler(len(dataset), tc.batch_size, cfg.seed)
+    start_step = 0 if resume is None else resume.global_step
+    # Worker seeds differ between the first launch and each resumed one.
+    loader_seed = zlib.crc32(f"{cfg.seed}/loader/{start_step}".encode())
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=tc.batch_size,
-        shuffle=True,
+        sampler=sampler,
         drop_last=True,
         num_workers=cfg.data.num_workers,
         pin_memory=device.type == "cuda",
         persistent_workers=cfg.data.num_workers > 0,
         worker_init_fn=_seed_worker,
-        generator=torch.Generator().manual_seed(cfg.seed),
+        generator=torch.Generator().manual_seed(loader_seed),
     )
-    steps_per_epoch = len(loader)
+    steps_per_epoch = len(dataset) // tc.batch_size
     if steps_per_epoch == 0:
         raise ValueError(
             f"{len(dataset)} pretraining images < batch size {tc.batch_size}"
@@ -241,11 +316,57 @@ def train(
 
     step = 0
     epoch = 0
+    start_epoch, skip = 1, 0
+    if resume is not None:
+        expected = resume.epoch * steps_per_epoch + resume.step_in_epoch
+        if resume.global_step != expected or resume.step_in_epoch >= steps_per_epoch:
+            raise ValueError("the resume state does not match this dataset size")
+        assert resume.backbone is not None and resume.projector is not None
+        assert resume.optimizer is not None
+        backbone.load_state_dict(resume.backbone)
+        projector.load_state_dict(resume.projector)
+        optimizer.load_state_dict(resume.optimizer)
+        step, epoch = resume.global_step, resume.epoch
+        start_epoch, skip = resume.epoch + 1, resume.step_in_epoch
+        log.truncate(step)
+        if resume.rng_cpu is not None:
+            torch.set_rng_state(resume.rng_cpu)
+        if resume.rng_cuda and device.type == "cuda":
+            torch.cuda.set_rng_state_all(resume.rng_cuda)
+        print(f"resuming after step {step} (epoch {start_epoch}, step {skip} of it)")
+    elif reuse_run_dir:
+        log.truncate(0)
+
+    def snapshot(
+        epoch_done: int, in_epoch: int, epoch_sum: torch.Tensor | None, elapsed: float
+    ) -> resume_lib.ResumeState:
+        return resume_lib.ResumeState(
+            config=config.to_dict(cfg),
+            global_step=step,
+            epoch=epoch_done,
+            step_in_epoch=in_epoch,
+            backbone=backbone.state_dict(),
+            projector=projector.state_dict(),
+            optimizer=optimizer.state_dict(),
+            epoch_sum=None if epoch_sum is None else epoch_sum.cpu(),
+            epoch_elapsed_s=elapsed,
+            rng_cpu=torch.get_rng_state(),
+            rng_cuda=_cuda_rng_states(),
+        )
+
     last = run_path / LAST_CHECKPOINT
-    for epoch in range(1, tc.epochs + 1):
+    for epoch in range(start_epoch, tc.epochs + 1):
         epoch_start = interval_start = time.perf_counter()
         interval_steps = 0
         epoch_sum = torch.zeros(len(STAT_KEYS), device=device)
+        elapsed_before = 0.0
+        epoch_step = 0
+        if resume is not None and epoch == start_epoch and skip > 0:
+            epoch_step = skip
+            elapsed_before = resume.epoch_elapsed_s
+            if resume.epoch_sum is not None:
+                epoch_sum += resume.epoch_sum.to(device)
+        sampler.set_epoch(epoch, epoch_step)
         for view_list, _ in loader:
             lr = schedule.lr_at(step, peak_lr, warmup_steps, total_steps)
             for group in optimizer.param_groups:
@@ -258,6 +379,7 @@ def train(
             loss.backward()  # pyright: ignore[reportUnknownMemberType]
             optimizer.step()  # pyright: ignore[reportUnknownMemberType]
             step += 1
+            epoch_step += 1
             interval_steps += 1
             stats = _step_stats(h, z, loss_stats)
             epoch_sum += stats
@@ -279,7 +401,13 @@ def train(
                     }
                 )
                 interval_start, interval_steps = now, 0
-        epoch_time = time.perf_counter() - epoch_start
+            if preempt.requested and epoch_step < steps_per_epoch:
+                elapsed = elapsed_before + time.perf_counter() - epoch_start
+                state = snapshot(epoch - 1, epoch_step, epoch_sum, elapsed)
+                resume_lib.save(resume_path, state)
+                print(f"preemption requested: saved {resume_path} at step {step}")
+                return TrainResult(run_path, last, step, epoch - 1, preempted=True)
+        epoch_time = elapsed_before + time.perf_counter() - epoch_start
         is_last = epoch == tc.epochs
         epoch_record: dict[str, object] = {
             "kind": "epoch",
@@ -296,4 +424,21 @@ def train(
             path = run_path / checkpoint_name(epoch)
             checkpoint.save(path, backbone, projector, cfg, epoch)
             checkpoint.save(last, backbone, projector, cfg, epoch)
+        if is_last:
+            break
+        resume_lib.save(resume_path, snapshot(epoch, 0, None, 0.0))
+        if preempt.requested:
+            print(f"preemption requested: saved {resume_path} at step {step}")
+            return TrainResult(run_path, last, step, epoch, preempted=True)
+    # The weights live in last.pt; the marker only records that the run is done.
+    done = resume_lib.ResumeState(
+        config.to_dict(cfg), step, epoch, step_in_epoch=0, complete=True
+    )
+    resume_lib.save(resume_path, done)
     return TrainResult(run_path, last, step, epoch)
+
+
+def _cuda_rng_states() -> list[torch.Tensor]:
+    if not torch.cuda.is_available():
+        return []
+    return list(torch.cuda.get_rng_state_all())

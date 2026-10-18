@@ -17,9 +17,15 @@ from lejepa_norm import config
 from lejepa_norm.data import datasets
 from lejepa_norm.data import views
 from lejepa_norm.eval import downstream
+from lejepa_norm.train import resume
 
 FloatArray = numpy.typing.NDArray[numpy.float32]
 IntArray = numpy.typing.NDArray[numpy.int64]
+
+
+def _worker_init(worker_id: int) -> None:
+    del worker_id
+    resume.ignore_preemption_signal()
 
 
 @torch.no_grad()
@@ -90,6 +96,7 @@ class OnlineKnn:
                 shuffle=False,
                 num_workers=cfg.data.num_workers,
                 pin_memory=device.type == "cuda",
+                worker_init_fn=_worker_init,
             )
             for split in ("train", "test")
         }

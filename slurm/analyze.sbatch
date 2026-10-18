@@ -10,19 +10,29 @@
 # (NOTE is relative to LEJEPA_NORM_NOTES_DIR. apps/analyze.py takes one KEY=VALUE
 # per --set.)
 #
-# The job log goes to <LEJEPA_NORM_RUNS_DIR>/RUN_NAME/slurm-analyze-<jobid>.log;
-# the --output file below only catches failures before the run directory is known.
+# Preemption: analyze has no checkpoint; it is killed and the requeued job simply
+# recomputes everything (re-running updates the note's generated sections in
+# place). See slurm/README.md.
+#
+# The job log goes to <LEJEPA_NORM_RUNS_DIR>/RUN_NAME/slurm-analyze-<jobid>.log
+# (appended across requeues); the --output file below only catches failures
+# before the run directory is known.
 #
 #SBATCH --job-name=lejepa-analyze
 #SBATCH --output=slurm-%x-%j.out
+#SBATCH --open-mode=append
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
+# CPU-only jobs on GPU nodes may use at most (node cores - 2 * GPUs) CPUs; keep
+# this modest so it fits under that cap on every node.
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-# TODO(cluster docs): partition name (CPU); not yet looked up, do not guess.
-#SBATCH --partition=TODO_PARTITION
-# TODO(cluster docs): time limit allowed on the chosen partition.
-#SBATCH --time=TODO_TIME_LIMIT
+#SBATCH --partition=general
+#SBATCH --qos=general
+# 12:00:00 is the maximum wall time of the general QoS.
+#SBATCH --time=12:00:00
+#SBATCH --signal=B:USR1@300
+#SBATCH --requeue
 
 if [[ $# -lt 3 ]]; then
   echo "usage: sbatch slurm/analyze.sbatch CONFIG RUN_NAME NOTE [args ...]" >&2
@@ -38,5 +48,5 @@ source slurm/common.sh
 log_to_run_dir "${RUN_NAME}" analyze
 
 set -x
-"${PYTHON}" apps/analyze.py --config "${CONFIG}" --run-name "${RUN_NAME}" \
-  --note "${NOTE}" "$@"
+run_preemptable "${PYTHON}" apps/analyze.py --config "${CONFIG}" \
+  --run-name "${RUN_NAME}" --note "${NOTE}" "$@"

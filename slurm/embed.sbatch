@@ -1,5 +1,6 @@
 #!/bin/bash
-# Dumps multi-view embeddings of one checkpoint with apps/embed.py (single GPU).
+# Dumps multi-view embeddings of one checkpoint with apps/embed.py (single GPU),
+# preemption-safe.
 #
 # Usage (from the repo root):
 #   sbatch slurm/embed.sbatch CONFIG RUN_NAME CHECKPOINT [extra apps/embed.py args]
@@ -9,21 +10,31 @@
 # (A relative CHECKPOINT is resolved against <LEJEPA_NORM_RUNS_DIR>/RUN_NAME/; an
 # absolute path is used as is.)
 #
-# The job log goes to <LEJEPA_NORM_RUNS_DIR>/RUN_NAME/slurm-embed-<jobid>.log; the
-# --output file below only catches failures before the run directory is known.
+# Runs with `--resume`: shards are written atomically, so a preempted (killed and
+# requeued) job writes only the shards that are still missing. To replace an
+# existing dump, delete it first (`--overwrite` cannot be combined with
+# `--resume`). See slurm/README.md.
+#
+# The job log goes to <LEJEPA_NORM_RUNS_DIR>/RUN_NAME/slurm-embed-<jobid>.log
+# (appended across requeues); the --output file below only catches failures
+# before the run directory is known.
 #
 #SBATCH --job-name=lejepa-embed
 #SBATCH --output=slurm-%x-%j.out
+#SBATCH --open-mode=append
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-# TODO(cluster docs): partition name; not yet looked up, do not guess.
-#SBATCH --partition=TODO_PARTITION
-# TODO(cluster docs): GPU request syntax and type (planned: 1x A100).
+#SBATCH --partition=general
+#SBATCH --qos=general
+# TODO(cluster docs): GPU model selection syntax is not documented (nodes have
+# A40/A100/L40S/H100/H200); add a type here only once confirmed.
 #SBATCH --gres=gpu:1
-# TODO(cluster docs): time limit allowed on the chosen partition.
-#SBATCH --time=TODO_TIME_LIMIT
+# 12:00:00 is the maximum wall time of the general QoS.
+#SBATCH --time=12:00:00
+#SBATCH --signal=B:USR1@300
+#SBATCH --requeue
 
 if [[ $# -lt 3 ]]; then
   echo "usage: sbatch slurm/embed.sbatch CONFIG RUN_NAME CHECKPOINT [args ...]" >&2
@@ -42,6 +53,6 @@ if [[ "${CHECKPOINT}" != /* ]]; then
 fi
 
 set -x
-"${PYTHON}" apps/embed.py --config "${CONFIG}" --run-name "${RUN_NAME}" \
-  --checkpoint "${CHECKPOINT}" --env-file "${ENV_FILE}" \
-  --set "data.num_workers=${SLURM_CPUS_PER_TASK:-8}" "$@"
+run_preemptable "${PYTHON}" apps/embed.py --config "${CONFIG}" \
+  --run-name "${RUN_NAME}" --checkpoint "${CHECKPOINT}" --env-file "${ENV_FILE}" \
+  --resume --set "data.num_workers=${SLURM_CPUS_PER_TASK:-8}" "$@"

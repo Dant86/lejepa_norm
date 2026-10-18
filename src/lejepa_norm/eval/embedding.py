@@ -10,6 +10,10 @@ Augmentation randomness is seeded per shard from `(seed, set, corruption,
 severity, first image index)`, so a rerun reproduces every shard exactly,
 independent of `--sets` and `--max-images`. The model runs in eval mode (BatchNorm
 uses running statistics), under `torch.no_grad`, in fp32.
+
+Shards are written atomically, so with `resume=True` an interrupted dump (e.g. a
+preempted job) is completed by writing only the shards that are missing; the
+result equals an uninterrupted run.
 """
 
 import collections.abc
@@ -127,6 +131,30 @@ def _existing_shards(directory: pathlib.Path) -> list[pathlib.Path]:
     return sorted(directory.glob("*.npz"))
 
 
+def _shard_name(part: int) -> str:
+    return f"part-{part:05d}.npz"
+
+
+def _check_resumable(
+    path: pathlib.Path, index: range, corruption: str, severity: int
+) -> None:
+    """Fails if an existing shard is not the one this job would write."""
+    with numpy.load(path, allow_pickle=False) as arrays:
+        image_id = arrays["image_id"]
+        corruptions = arrays["corruption"]
+        severities = arrays["severity"]
+    if (
+        image_id.tolist() != list(index)
+        or set(corruptions.tolist()) != {corruption}
+        or set(severities.tolist()) != {severity}
+    ):
+        raise ValueError(
+            f"{path} does not hold images {index.start}..{index.stop - 1} of"
+            f" {corruption or 'clean'}/{severity}; it was written by a different"
+            " job, so --resume cannot continue it (use --overwrite)"
+        )
+
+
 def embed_run(
     ckpt_path: str | os.PathLike[str],
     cfg: config.ExperimentConfig,
@@ -138,6 +166,7 @@ def embed_run(
     overwrite: bool = False,
     shard_size: int = SHARD_SIZE,
     device: torch.device | None = None,
+    resume: bool = False,
 ) -> dict[str, int]:
     """Writes the embedding dump of one checkpoint.
 
@@ -156,21 +185,28 @@ def embed_run(
         overwrite: Replace existing shards; otherwise existing shards are an error.
         shard_size: Maximum images per shard.
         device: Defaults to CUDA when available, else CPU.
+        resume: Keep existing shards and write only the missing ones (for a job
+            that was interrupted; same checkpoint, config and arguments).
 
     Returns:
-        Number of images written per evaluation set.
+        Number of images in the dump per evaluation set (skipped shards
+        included).
 
     Raises:
-        FileExistsError: A requested set already has shards and `overwrite` is off.
-        ValueError: Unknown evaluation set.
+        FileExistsError: A requested set already has shards and neither
+            `overwrite` nor `resume` is on.
+        ValueError: Unknown evaluation set, both `overwrite` and `resume`, or
+            (with `resume`) an existing shard that this job would not write.
     """
     unknown = [s for s in eval_sets if s not in dumps.EVAL_SETS]
     if unknown:
         raise ValueError(f"unknown eval sets {unknown}; expected {dumps.EVAL_SETS}")
+    if overwrite and resume:
+        raise ValueError("overwrite and resume are mutually exclusive")
     targets = {
         s: dumps.set_dir(embed_dir, run_name, s) for s in dict.fromkeys(eval_sets)
     }
-    if not overwrite:
+    if not overwrite and not resume:
         for directory in targets.values():
             if _existing_shards(directory):
                 raise FileExistsError(
@@ -188,8 +224,11 @@ def embed_run(
     counts: dict[str, int] = {}
     for name, directory in targets.items():
         directory.mkdir(parents=True, exist_ok=True)
-        for stale in _existing_shards(directory):
-            stale.unlink()
+        existing = set(_existing_shards(directory))
+        if not resume:
+            for stale in existing:
+                stale.unlink()
+            existing.clear()
         part = 0
         total = 0
         for source in _sources(name, data_dir, transform):
@@ -198,6 +237,13 @@ def embed_run(
                 n = min(n, max_images)
             for start in range(0, n, shard_size):
                 index = range(start, min(start + shard_size, n))
+                path = directory / _shard_name(part)
+                if path in existing:
+                    _check_resumable(path, index, source.corruption, source.severity)
+                    existing.discard(path)
+                    part += 1
+                    total += len(index)
+                    continue
                 torch.manual_seed(  # pyright: ignore[reportUnknownMemberType]
                     _shard_seed(
                         cfg.seed, name, source.corruption, source.severity, start
@@ -221,7 +267,7 @@ def embed_run(
                     labels.append(label)
                 count = len(index)
                 shards.save_shard(
-                    directory / f"part-{part:05d}.npz",
+                    path,
                     shards.EmbeddingShard(
                         z=torch.cat(z_parts).numpy(),
                         h=torch.cat(h_parts).numpy(),
@@ -237,5 +283,11 @@ def embed_run(
                 )
                 part += 1
                 total += count
+        if existing:
+            names = ", ".join(sorted(p.name for p in existing))
+            raise ValueError(
+                f"{directory} holds shards this job does not write ({names}); "
+                "use --overwrite"
+            )
         counts[name] = total
     return counts

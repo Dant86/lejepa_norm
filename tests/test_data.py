@@ -17,6 +17,7 @@ from lejepa_norm import config
 from lejepa_norm.data import corruptions
 from lejepa_norm.data import datasets
 from lejepa_norm.data import layout
+from lejepa_norm.data import prepare
 from lejepa_norm.data import views
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -209,3 +210,55 @@ def test_views_and_center_view_share_normalization() -> None:
     outputs = [views.CenterTransform(cfg)(image), *views.MultiViewTransform(cfg)(image)]
     for out in outputs:
         assert torch.allclose(out, expected.expand_as(out), atol=1e-5)
+
+
+def test_build_resumes_after_interruption(tmp_path: pathlib.Path) -> None:
+    """A rerun completes a killed build and keeps every array it finished."""
+    _write_fake_raw(tmp_path)
+    overrides = (
+        "data.corruptions=[gaussian_noise, pixelate]",
+        "data.severities=[1]",
+        "data.num_workers=1",
+    )
+    first = _run_app(tmp_path, *overrides)
+    assert first.returncode == 0, first.stderr
+    stl_test = layout.images_path(tmp_path, "stl10", "test")
+    noise = layout.corrupted_images_path(tmp_path, "gaussian_noise", 1)
+    pixelate = layout.corrupted_images_path(tmp_path, "pixelate", 1)
+    expected = {p: np.load(p) for p in (stl_test, noise, pixelate)}
+    expected_labels = np.load(layout.labels_path(tmp_path, "stl10", "test"))
+
+    # What a kill can leave behind: arrays never started, `.partial` files cut off
+    # mid-write, and (at worst) labels written but not yet the images.
+    for path in (stl_test, pixelate):
+        path.unlink()
+        path.with_name(f"{path.stem}.partial.npy").write_bytes(b"cut off")
+    finished = noise.stat().st_mtime_ns
+
+    second = _run_app(tmp_path, *overrides)
+    assert second.returncode == 0, second.stderr
+    assert noise.stat().st_mtime_ns == finished  # finished arrays are skipped
+    for path, array in expected.items():
+        np.testing.assert_array_equal(np.load(path), array)
+    np.testing.assert_array_equal(
+        np.load(layout.labels_path(tmp_path, "stl10", "test")), expected_labels
+    )
+    assert not list(tmp_path.rglob("*.partial.npy"))
+
+    # The images file is the marker the build skips on, so a kill between the two
+    # writes of a split must never leave images without labels.
+    calls: list[pathlib.Path] = []
+
+    def die_after_first_save(path: pathlib.Path, array: np.ndarray) -> None:
+        if calls:
+            raise KeyboardInterrupt  # killed before the second write
+        calls.append(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(path, array)
+
+    images = np.zeros((2, 96, 96, 3), dtype=np.uint8)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(prepare, "_save", die_after_first_save)
+        with pytest.raises(KeyboardInterrupt):
+            prepare._save_split(tmp_path, "fake", "x", images, np.zeros(2))  # pyright: ignore[reportPrivateUsage]
+    assert not layout.images_path(tmp_path, "fake", "x").exists()
