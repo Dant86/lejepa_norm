@@ -126,24 +126,28 @@ def _cell(table_line: str, column: int) -> float:
     return float(table_line.split("|")[column + 1].split()[0])
 
 
-def test_analyze_writes_tables_and_figures_into_note(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+@pytest.fixture(scope="module")
+def fake_run(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    """Fake embedding dumps and metrics, written once; the tests only read them."""
+    root = tmp_path_factory.mktemp("fake_run")
+    _write_fake_run(root / "embed", root / "runs")
+    return root
+
+
+def _setup_env(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fake_run: pathlib.Path
 ) -> None:
-    chrome = pathlib.Path(_CHROME_ENV) if _CHROME_ENV else None
     # Empty means "unset" for load_paths and blocks values from any `.env` file.
     monkeypatch.setenv(paths.KALEIDO_CHROME_VAR, _CHROME_ENV or "")
-    for var, sub in [
-        (paths.DATA_DIR_VAR, "data"),
-        (paths.RUNS_DIR_VAR, "runs"),
-        (paths.EMBED_DIR_VAR, "embed"),
-        (paths.NOTES_DIR_VAR, "notes"),
-    ]:
-        monkeypatch.setenv(var, str(tmp_path / sub))
+    monkeypatch.setenv(paths.DATA_DIR_VAR, str(tmp_path / "data"))
+    monkeypatch.setenv(paths.RUNS_DIR_VAR, str(fake_run / "runs"))
+    monkeypatch.setenv(paths.EMBED_DIR_VAR, str(fake_run / "embed"))
+    monkeypatch.setenv(paths.NOTES_DIR_VAR, str(tmp_path / "notes"))
     monkeypatch.chdir(tmp_path)  # no stray .env is picked up
-    _write_fake_run(tmp_path / "embed", tmp_path / "runs")
-    figures = plotting.chrome_available(chrome)
 
-    argv = [
+
+def _argv(*extra: str) -> list[str]:
+    return [
         "--config",
         str(REPO / "configs" / "base.yaml"),
         "--run-name",
@@ -151,14 +155,20 @@ def test_analyze_writes_tables_and_figures_into_note(
         "--note",
         "idea/exp.md",
         "--set",
-        "eval.num_bootstrap=20",
+        "eval.num_bootstrap=10",
         "--set",
         "eval.knn_k=5",
         "--set",
-        "eval.max_kernel_images=200",
+        "eval.max_kernel_images=100",
+        *extra,
     ]
-    if not figures:
-        argv.append("--no-figures")
+
+
+def test_analyze_writes_tables_into_note(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fake_run: pathlib.Path
+) -> None:
+    _setup_env(tmp_path, monkeypatch, fake_run)
+    argv = _argv("--no-figures")
     app = _load_app()
     assert app.main(argv) == 0
     note = tmp_path / "notes" / "idea" / "exp.md"
@@ -195,11 +205,22 @@ def test_analyze_writes_tables_and_figures_into_note(
     probe_row = next(ln for ln in lines if ln.startswith("| z | augmented | u_hat |"))
     assert _cell(probe_row, 3) > 0.5
 
+    assert list(note.parent.glob("*.png")) == []  # --no-figures
+
+
+@pytest.mark.slow  # renders PNGs through headless Chrome
+def test_analyze_renders_figures_into_note(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fake_run: pathlib.Path
+) -> None:
+    if not plotting.chrome_available(
+        pathlib.Path(_CHROME_ENV) if _CHROME_ENV else None
+    ):
+        pytest.skip("Chrome for Kaleido is not available")
+    _setup_env(tmp_path, monkeypatch, fake_run)
+    assert _load_app().main(_argv()) == 0
+    note = tmp_path / "notes" / "idea" / "exp.md"
     pngs = sorted(p.name for p in note.parent.glob("*.png"))
-    if figures:
-        assert "exp_radius_hist_z.png" in pngs
-        assert "exp_radius_shift_h.png" in pngs
-        assert "exp_kappa_training.png" in pngs
-        assert "![radius histogram of z](exp_radius_hist_z.png)" in first
-    else:
-        assert pngs == []
+    assert "exp_radius_hist_z.png" in pngs
+    assert "exp_radius_shift_h.png" in pngs
+    assert "exp_kappa_training.png" in pngs
+    assert "![radius histogram of z](exp_radius_hist_z.png)" in note.read_text()

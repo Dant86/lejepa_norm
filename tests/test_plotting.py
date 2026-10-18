@@ -30,6 +30,7 @@ def test_export_rejects_non_png(tmp_path: pathlib.Path) -> None:
         plotting.export_png(fig, tmp_path / "fig.html")
 
 
+@pytest.mark.slow  # headless Chrome
 def test_figures_render_to_png(tmp_path: pathlib.Path) -> None:
     chrome = _chrome()
     if not plotting.chrome_available(chrome):
