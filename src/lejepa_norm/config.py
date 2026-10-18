@@ -31,9 +31,10 @@ class DataConfig:
     local_scale: tuple[float, float] = (0.05, 0.3)
     num_workers: int = 8
     # Per-channel normalization applied as the last step of every view (training and
-    # embedding must agree). Commonly cited STL-10 statistics.
-    mean: tuple[float, float, float] = (0.4467, 0.4398, 0.4066)
-    std: tuple[float, float, float] = (0.2603, 0.2566, 0.2713)
+    # embedding must agree). Computed over STL-10 unlabeled + train with
+    # `apps/prepare_data.py --stage stats`.
+    mean: tuple[float, float, float] = (0.4409, 0.4279, 0.3868)
+    std: tuple[float, float, float] = (0.2683, 0.2610, 0.2687)
     # STL-10-C generation (apps/prepare_data.py --stage build).
     corruptions: tuple[str, ...] = (
         "gaussian_noise",
