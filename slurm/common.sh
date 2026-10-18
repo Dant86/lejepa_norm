@@ -111,3 +111,28 @@ run_preemptable() {
   fi
   exit "${return_code}"
 }
+
+# --- Sweeps ----------------------------------------------------------------------
+#
+# sweep_params INDEX "LAMBDA ..." "SEED ..."
+#   Maps a job-array task index to one (lambda, seed) pair and prints "LAMBDA SEED".
+#   The index runs over lambdas first, then seeds: INDEX = lambda_idx * n_seeds +
+#   seed_idx. Fails (exit 2) on an empty list or an index outside the grid, so a
+#   wrong --array range is caught before any compute.
+sweep_params() {
+  local index="$1"
+  local -a lambdas seeds
+  read -r -a lambdas <<<"$2"
+  read -r -a seeds <<<"$3"
+  local n_seeds="${#seeds[@]}"
+  local total=$(( ${#lambdas[@]} * n_seeds ))
+  if (( total == 0 )); then
+    echo "error: LAMBDAS and SEEDS must both be non-empty" >&2
+    return 2
+  fi
+  if (( index < 0 || index >= total )); then
+    echo "error: array index ${index} is outside the grid; use --array=0-$(( total - 1 ))" >&2
+    return 2
+  fi
+  echo "${lambdas[index / n_seeds]} ${seeds[index % n_seeds]}"
+}

@@ -90,3 +90,43 @@ def test_app_exit_code_is_propagated(tmp_path: pathlib.Path, app_code: int) -> N
     proc = _start(tmp_path, f"exit:{app_code}")
     out, _ = proc.communicate(timeout=60)
     assert proc.returncode == app_code, out
+
+
+def _sweep_params(
+    tmp_path: pathlib.Path, index: int, lambdas: str, seeds: str
+) -> subprocess.CompletedProcess[str]:
+    assert BASH is not None
+    env_file = tmp_path / "test.env"
+    env_file.write_text(f"LEJEPA_NORM_RUNS_DIR={tmp_path / 'runs'}\n")
+    script = (
+        f'source "{REPO / "slurm" / "common.sh"}"\n'
+        f'sweep_params {index} "{lambdas}" "{seeds}"\n'
+    )
+    return subprocess.run(
+        [BASH, "-c", script],
+        env={**os.environ, "LEJEPA_NORM_ENV_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_sweep_array_index_covers_the_lambda_seed_grid_exactly_once(
+    tmp_path: pathlib.Path,
+) -> None:
+    lambdas, seeds = "0.02 0.05 0.1", "0 1 2"
+    pairs: list[tuple[str, ...]] = []
+    for index in range(9):
+        result = _sweep_params(tmp_path, index, lambdas, seeds)
+        assert result.returncode == 0, result.stderr
+        pairs.append(tuple(result.stdout.split()))
+    expected = [(lam, seed) for lam in lambdas.split() for seed in seeds.split()]
+    assert pairs == expected  # lambda-major, every pair once
+
+
+def test_sweep_rejects_an_array_range_that_does_not_match_the_grid(
+    tmp_path: pathlib.Path,
+) -> None:
+    too_far = _sweep_params(tmp_path, 9, "0.02 0.05 0.1", "0 1 2")
+    assert too_far.returncode == 2
+    assert "--array=0-8" in too_far.stderr
+    assert _sweep_params(tmp_path, 0, "", "0 1").returncode == 2

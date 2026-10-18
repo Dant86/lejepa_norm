@@ -108,3 +108,24 @@ training) `preemption requested: saved .../resume.pt at step N` and
 `sacct -j <jobid> --format=JobID,State,ExitCode,Elapsed` and
 `scontrol show job <jobid>` (`Restarts=`); the next attempt logs
 `resuming after step N`.
+
+## Sweeps (job arrays)
+
+`sweep.sbatch` runs a lambda x seed grid as one job array: every task is its own
+independent, preemptable training run with its own run directory
+(`<RUN_PREFIX>_lam<lambda>_s<seed>`), and a requeued task resumes like a plain
+`train.sbatch` job.
+
+```bash
+LAMBDAS="0.02 0.05 0.1" SEEDS="0 1 2" \
+  sbatch --array=0-8 slurm/sweep.sbatch configs/base.yaml radius_marginal
+```
+
+- The array range must be `0-(n_lambdas * n_seeds - 1)`; a task outside the grid
+  fails immediately with the correct range. The task index runs over lambdas
+  first, then seeds.
+- Add `%N` to cap concurrency (`--array=0-8%3`). The DSI guide suggests `%5`-`%10`
+  for GPU-heavy arrays; `general` allows 24 running jobs per user.
+- Override resources at submit time, e.g. `--cpus-per-task=4`.
+- Resubmit a single failed task with `--array=<index>`.
+- Everything after `RUN_PREFIX` is passed to `apps/train.py` as extra arguments.
