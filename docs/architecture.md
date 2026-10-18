@@ -34,8 +34,6 @@ graph LR
     TR --> TRAIN
     EM --> CFG
     EM --> PTH
-    EM --> DATA
-    EM --> MOD
     EM --> EVAL
     AN --> CFG
     AN --> PTH
@@ -47,6 +45,7 @@ graph LR
     TRAIN --> LOSS
     TRAIN --> EVAL
     EVAL --> DATA
+    EVAL --> MOD
     EVAL --> CFG
     DATA --> CFG
     MOD --> CFG
