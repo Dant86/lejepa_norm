@@ -1,4 +1,12 @@
-"""Computes all analyses for one run and writes them into an experiment note.
+"""Computes analyses and writes them into an experiment note.
+
+Two modes. **Per-run** (`--run-name`): all analyses of one run, below. **Sweep**
+(`--sweep PREFIX`): training-log summaries of every run `<runs_dir>/PREFIX_*`
+grouped by lambda (resolved configs, not names): a per-lambda table (mean ± std
+over seeds at the last epoch all seeds reached, with the N(0, I) targets), a
+per-run progress table and, with Chrome, curves over epochs (mean with min-max
+over seeds) of kappa_z, ||z|| mean and standard deviation, and k-NN accuracy. It
+needs no embedding dumps and can be run while the sweep is still training.
 
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
@@ -6,13 +14,16 @@ in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
 sections of the note and PNG figures next to it. Re-running updates the
 generated sections in place.
 
-Example:
+Examples:
     python apps/analyze.py --config configs/base.yaml --run-name a_l0.05_s0 \
         --note radius-conditional/variant_a.md --set eval.num_bootstrap=200
+    python apps/analyze.py --sweep radius_marginal \
+        --note radius_marginal/lambda_sweep.md
 """
 
 import argparse
 import collections.abc
+import math
 import pathlib
 import sys
 import typing
@@ -24,6 +35,7 @@ from lejepa_norm import reporting
 from lejepa_norm.eval import analysis
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import runlog
+from lejepa_norm.eval import sweep
 
 _TITLES = {
     analysis.MARGINAL: "Marginal radius (STL-10 test)",
@@ -42,8 +54,12 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Writes all analyses of one run into an experiment note."
     )
-    parser.add_argument("--config", required=True, type=pathlib.Path)
-    parser.add_argument("--run-name", required=True)
+    parser.add_argument("--config", type=pathlib.Path, help="Per-run mode only.")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--run-name", help="Analyze one run (needs --config).")
+    mode.add_argument(
+        "--sweep", metavar="PREFIX", help="Summarize all runs named PREFIX_*."
+    )
     parser.add_argument(
         "--note",
         required=True,
@@ -54,7 +70,10 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-figures", action="store_true", help="Skip PNG export (no Chrome)."
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.run_name is not None and args.config is None:
+        parser.error("--run-name requires --config")
+    return args
 
 
 def _figures(
@@ -135,9 +154,81 @@ def _figures(
     return links
 
 
+def _sweep_figures(
+    runs: list[sweep.Run], note: pathlib.Path, chrome: pathlib.Path | None
+) -> list[str]:
+    prefix = note.parent / note.stem
+    d = runs[0].embed_dim
+    groups = sweep.by_lambda(runs)
+    plots = (
+        (sweep.KAPPA_Z, "kappa_z", "kappa_z during training", 1.0),
+        (sweep.Z_NORM_MEAN, "z_norm_mean", "mean ||z|| during training", None),
+        (sweep.Z_NORM_STD, "z_norm_std", "std of ||z|| during training", None),
+        ("knn_acc_h", "knn_acc_h", "online k-NN accuracy (backbone h)", None),
+    )
+    references = {
+        "z_norm_mean": math.sqrt(d - 0.5),
+        "z_norm_std": math.sqrt(0.5),
+    }
+    links: list[str] = []
+    for key, name, title, reference in plots:
+        curves = {
+            f"lambda={lam:g}": sweep.curve(group, key) for lam, group in groups.items()
+        }
+        series = {
+            label: plotting.Series(c.epochs, c.mean, c.low, c.high)
+            for label, c in curves.items()
+            if c.epochs
+        }
+        if not series:
+            continue
+        fig = plotting.line_plot(
+            series,
+            f"{title} (mean over seeds, bars: min-max)",
+            "epoch",
+            name,
+            reference=references.get(name, reference),
+        )
+        out = plotting.export_png(fig, f"{prefix}_curve_{name}.png", chrome)
+        links.append(reporting.image_link(out, note, title))
+    return links
+
+
+def _run_sweep(args: argparse.Namespace) -> int:
+    locations = paths.load_paths()
+    runs = sweep.load_runs(locations.runs_dir, args.sweep)
+    if not runs:
+        print(f"no runs named {args.sweep}_* with a resolved config", file=sys.stderr)
+        return 1
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "sweep.summary",
+        f"### Sweep `{args.sweep}`: per lambda (mean ± std over seeds)\n\n"
+        "Each metric is taken at the last epoch that every seed of that lambda has "
+        "logged it; the `epoch` column is that epoch for `kappa_z`, and sparsely "
+        "logged metrics (k-NN) may come from an earlier one.\n\n"
+        + reporting.markdown_table(sweep.summary_rows(runs)),
+    )
+    reporting.update_section(
+        note,
+        "sweep.runs",
+        "### Sweep runs\n\n" + reporting.markdown_table(sweep.run_rows(runs)),
+    )
+    if not args.no_figures:
+        links = _sweep_figures(runs, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note, "sweep.figures", "### Sweep figures\n\n" + "\n\n".join(links)
+        )
+    print(f"wrote {note}")
+    return 0
+
+
 def main(argv: collections.abc.Sequence[str]) -> int:
     """Runs the analysis app; returns a process exit code."""
     args = _parse(argv)
+    if args.sweep is not None:
+        return _run_sweep(args)
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
     note = locations.notes_dir / args.note
