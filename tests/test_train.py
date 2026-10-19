@@ -67,6 +67,20 @@ def env(
     return tmp_path
 
 
+_VIEW_TYPE_KEYS = tuple(
+    f"{stat}_{view}"
+    for stat in (
+        "kappa_z",
+        "z_norm_mean",
+        "z_norm_std",
+        "kappa_h",
+        "h_norm_mean",
+        "h_norm_std",
+    )
+    for view in ("global", "local")
+)
+
+
 def _train_argv(*extra: str) -> list[str]:
     argv = ["--run-name", RUN, "--env-file", os.devnull]
     for item in (*TINY, *extra):
@@ -90,6 +104,8 @@ def test_train_app_writes_metrics_config_and_checkpoints(env: pathlib.Path) -> N
     for record in steps:
         assert set(loop.STAT_KEYS) | {"lr", "images_per_s", "epoch"} <= set(record)
     assert {"knn_acc_h", "knn_acc_z", "kappa_z_epoch_mean"} <= set(epochs[0])
+    for key in _VIEW_TYPE_KEYS:  # finite values are checked for all keys below
+        assert key in steps[0] and f"{key}_epoch_mean" in epochs[0], key
     for record in records:
         for key, value in record.items():
             if key != "kind":
@@ -255,8 +271,14 @@ def test_interrupted_training_resumes_like_an_uninterrupted_run(
     assert [r["lr"] for r in ref_steps] == pytest.approx(expected_lr)
     # Same data order, optimizer state, global RNG and augmentation generator
     # state: the resumed run reproduces the uninterrupted one exactly.
-    for key in ("loss_total", "z_norm_mean"):
+    for key in ("loss_total", "z_norm_mean", *_VIEW_TYPE_KEYS):
         assert [r[key] for r in steps] == [r[key] for r in ref_steps], key
+    # The full records (step and epoch means, incl. the per-view-type epoch means of
+    # the epoch that spans the interruption) match, except wall-clock throughput.
+    timing = ("images_per_s", "epoch_time_s")
+    assert [{k: v for k, v in r.items() if k not in timing} for r in records] == [
+        {k: v for k, v in r.items() if k not in timing} for r in ref_records
+    ]
 
     final = checkpoint.load(run_dir / loop.LAST_CHECKPOINT)
     ref_final = checkpoint.load(ref_dir / loop.LAST_CHECKPOINT)
@@ -274,6 +296,38 @@ def test_interrupted_training_resumes_like_an_uninterrupted_run(
     assert app.main([*_train_argv(*RESUME_RUN), "--resume", "auto"]) == 0
     assert "nothing to do" in capsys.readouterr().out
     assert runlog.read_metrics(run_dir / runlog.METRICS_FILE) == records
+
+
+@pytest.mark.slow
+def test_resume_state_from_before_view_type_stats_still_loads(
+    env: pathlib.Path, reference_dir: pathlib.Path
+) -> None:
+    """An old-format `resume.pt` (9-entry `epoch_sum`) continues the run."""
+    run_dir = env / "runs" / RUN
+    first = _run_driver(env, "signal", 6, RUN)
+    assert first.returncode == resume.REQUEUE_EXIT_CODE, first.stderr
+    state = resume.load(run_dir / resume.RESUME_FILE)
+    assert state.epoch_sum is not None  # saved mid-epoch (step 7 of epoch 2)
+    assert state.epoch_sum.numel() == len(loop.STAT_KEYS)
+    state.epoch_sum = state.epoch_sum[: loop.LEGACY_NUM_STATS].clone()
+    resume.save(run_dir / resume.RESUME_FILE, state)
+
+    second = _run_driver(env, "none", -1, RUN, "--resume", "auto")
+    assert second.returncode == 0, second.stderr
+    records = runlog.read_metrics(run_dir / runlog.METRICS_FILE)
+    ref_records = runlog.read_metrics(reference_dir / runlog.METRICS_FILE)
+    old_keys = set(loop.STAT_KEYS[: loop.LEGACY_NUM_STATS])
+    epoch_two = next(r for r in records if r["kind"] == "epoch" and r["epoch"] == 2)
+    ref_two = next(r for r in ref_records if r["kind"] == "epoch" and r["epoch"] == 2)
+    for key in old_keys:  # the pooled statistics are unaffected
+        assert epoch_two[f"{key}_epoch_mean"] == ref_two[f"{key}_epoch_mean"], key
+    # The spanning epoch has no (partial, wrong) per-view-type means; steps do.
+    assert all(f"{key}_epoch_mean" not in epoch_two for key in _VIEW_TYPE_KEYS)
+    epoch_one = next(r for r in records if r["kind"] == "epoch" and r["epoch"] == 1)
+    assert all(f"{key}_epoch_mean" in epoch_one for key in _VIEW_TYPE_KEYS)
+    steps = [r for r in records if r["kind"] == "step"]
+    assert [r["step"] for r in steps] == list(range(1, 11))
+    assert all(key in r for r in steps for key in _VIEW_TYPE_KEYS)
 
 
 def test_training_does_not_depend_on_num_workers(env: pathlib.Path) -> None:

@@ -26,7 +26,12 @@ def _kappa(lam: float, seed: int, epoch: int) -> float:
 
 
 def _write_run(
-    runs: pathlib.Path, name: str, lam: float, seed: int, epochs: int
+    runs: pathlib.Path,
+    name: str,
+    lam: float,
+    seed: int,
+    epochs: int,
+    view_types: bool = False,
 ) -> None:
     cfg = config.ExperimentConfig(seed=seed)
     cfg.loss.lambda_ = lam
@@ -43,6 +48,17 @@ def _write_run(
             "z_norm_std_epoch_mean": 2.0,
             "loss_dist_epoch_mean": 5.0,
         }
+        if view_types:
+            record.update(
+                {
+                    "kappa_z_global_epoch_mean": 0.5 + seed,
+                    "kappa_z_local_epoch_mean": 0.25,
+                    "z_norm_mean_global_epoch_mean": 16.0,
+                    "z_norm_mean_local_epoch_mean": 12.0 + epoch,
+                    "z_norm_std_global_epoch_mean": 0.5,
+                    "z_norm_std_local_epoch_mean": 0.75,
+                }
+            )
         if epoch in (1, 3):  # k-NN is only logged on some epochs
             record["knn_acc_h"] = 0.1 * epoch
         lines.append(json.dumps(record))
@@ -58,6 +74,15 @@ def runs_dir(tmp_path: pathlib.Path) -> pathlib.Path:
             _write_run(runs, f"exp_lam{lam:g}_s{seed}", lam, seed, epochs)
     _write_run(runs, "other_lam0.05_s0", 0.05, 0, TARGET_EPOCHS)  # different prefix
     (runs / "exp_lam9_s9").mkdir()  # no resolved config: ignored
+    return runs
+
+
+@pytest.fixture
+def view_type_runs_dir(tmp_path: pathlib.Path) -> pathlib.Path:
+    runs = tmp_path / "runs_view_types"
+    for lam in LAMBDAS:
+        for seed in SEEDS:
+            _write_run(runs, f"exp_lam{lam:g}_s{seed}", lam, seed, TARGET_EPOCHS, True)
     return runs
 
 
@@ -151,10 +176,37 @@ def test_analyze_sweep_mode_writes_tables_idempotently(
     assert "| 0.1 | 3 | 2 |" in text  # capped at epoch 2 by the partial run
     assert "partial" in text and "exp_lam0.1_s2" in text
     assert "other_lam" not in text  # other prefixes stay out
+    assert "_global" not in text and "_local" not in text  # logs without the keys
     assert list(note.parent.glob("*.png")) == []  # --no-figures
 
     assert app.main(argv) == 0
     assert note.read_text() == text  # re-running rewrites the sections in place
+
+
+def test_view_type_columns_appear_only_when_the_logs_have_them(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runs_dir: pathlib.Path,
+    view_type_runs_dir: pathlib.Path,
+) -> None:
+    old_rows = sweep.summary_rows(sweep.load_runs(runs_dir, "exp"))
+    assert all("kappa_z_global" not in row for row in old_rows)
+    assert sweep.summary_keys(sweep.load_runs(runs_dir, "exp")) == sweep.SUMMARY_KEYS
+
+    runs = sweep.load_runs(view_type_runs_dir, "exp")
+    target, low_lam, _ = sweep.summary_rows(runs)
+    assert target["kappa_z_global"] == "1" and target["kappa_z_local"] == "1"
+    assert target["z_norm_std_local"] == "0.7071"
+    assert low_lam["kappa_z_global"] == "1.5 ± 1"  # seeds 0..2 -> 0.5, 1.5, 2.5
+    assert low_lam["kappa_z_local"] == "0.25 ± 0"
+    assert low_lam["z_norm_mean_local"] == "15 ± 0"  # 12 + epoch 3
+    assert all("kappa_z_global" in row for row in sweep.run_rows(runs))
+
+    _setup_env(tmp_path, monkeypatch, view_type_runs_dir)
+    argv = ["--sweep", "exp", "--note", "idea/sweep.md", "--no-figures"]
+    assert _load_app().main(argv) == 0
+    text = (tmp_path / "notes" / "idea" / "sweep.md").read_text()
+    assert "kappa_z_global" in text and "z_norm_mean_local" in text
 
 
 def test_analyze_sweep_mode_fails_when_no_run_matches(
@@ -181,4 +233,26 @@ def test_analyze_sweep_mode_renders_curves(
     pngs = sorted(p.name for p in note.parent.glob("*.png"))
     assert "sweep_curve_kappa_z.png" in pngs
     assert "sweep_curve_z_norm_mean.png" in pngs
+    assert not any("_global" in n or "_local" in n for n in pngs)
     assert "![" in note.read_text()
+
+
+@pytest.mark.slow  # renders PNGs through headless Chrome
+def test_analyze_sweep_mode_renders_view_type_curves_when_logged(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    view_type_runs_dir: pathlib.Path,
+) -> None:
+    if not plotting.chrome_available(
+        pathlib.Path(_CHROME_ENV) if _CHROME_ENV else None
+    ):
+        pytest.skip("Chrome for Kaleido is not available")
+    _setup_env(tmp_path, monkeypatch, view_type_runs_dir)
+    assert _load_app().main(["--sweep", "exp", "--note", "idea/sweep.md"]) == 0
+    pngs = {p.name for p in (tmp_path / "notes" / "idea").glob("*.png")}
+    assert {
+        "sweep_curve_kappa_z_global.png",
+        "sweep_curve_kappa_z_local.png",
+        "sweep_curve_z_norm_mean_global.png",
+        "sweep_curve_z_norm_mean_local.png",
+    } <= pngs

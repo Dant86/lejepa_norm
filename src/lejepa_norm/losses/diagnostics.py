@@ -1,4 +1,10 @@
-"""Detached scalar diagnostics shared by the loss variants."""
+"""Detached scalar diagnostics shared by the loss variants.
+
+`kappa` pooled over all views mixes views that may sit at different radii (global
+and local crops), while SIGReg acts per view. Apply `kappa` to the samples of one
+view type (e.g. `ViewBatch.global_z` flattened to `(views * batch, d)`) to measure
+the radial spread the loss actually controls.
+"""
 
 import torch
 
