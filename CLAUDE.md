@@ -4,6 +4,8 @@ Project: studying the role of the embedding radius in LeJEPA. Source of truth fo
 design is the Technical Design / Research Outline notes in the research vault;
 this file holds the rules every session must follow.
 
+**Current status, results so far, cluster facts and the next task: `docs/handoff.md`.**
+
 **Python:** 3.13
 
 ## Engineering Requirements
