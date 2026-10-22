@@ -100,9 +100,10 @@ def format_estimate(est: metrics.Estimate) -> str:
     return f"{est.value:.3f} [{est.low:.3f}, {est.high:.3f}]"
 
 
-def _subsample(
+def subsample(
     n: int, limit: int, rng: numpy.random.Generator
 ) -> numpy.typing.NDArray[numpy.int64]:
+    """Sorted random subset of `limit` of `n` indices (all of them if `n <= limit`)."""
     if n <= limit:
         return numpy.arange(n)
     return numpy.sort(rng.choice(n, size=limit, replace=False))
@@ -121,7 +122,7 @@ def _difficulty_pool(
     """
     n_test = test.label.size
     n_total = n_test + (0 if corrupt is None else corrupt.label.size)
-    pidx = _subsample(n_total, limit, rng)
+    pidx = subsample(n_total, limit, rng)
     parts = [dumps.take(test, pidx[pidx < n_test])]
     if corrupt is not None:
         parts.append(dumps.take(corrupt, pidx[pidx >= n_test] - n_test))
@@ -189,7 +190,7 @@ def run_analyses(
     tables: dict[str, list[Row]] = {name: [] for name in TABLES}
     figures: dict[features.Space, SpaceFigureData] = {}
     # Subsets are drawn once so that z and h are analyzed on the same images.
-    idx = _subsample(test.label.size, cfg.max_kernel_images, rng)
+    idx = subsample(test.label.size, cfg.max_kernel_images, rng)
     pool = _difficulty_pool(test, corrupt, cfg.max_kernel_images, rng)
 
     for space in features.SPACES:

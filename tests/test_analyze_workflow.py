@@ -208,6 +208,32 @@ def test_analyze_writes_tables_into_note(
     assert list(note.parent.glob("*.png")) == []  # --no-figures
 
 
+def test_analyze_redundancy_controls_mode_writes_only_its_section(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fake_run: pathlib.Path
+) -> None:
+    _setup_env(tmp_path, monkeypatch, fake_run)
+    argv = _argv("--redundancy-controls", "--set", "eval.num_permutations=8")
+    app = _load_app()
+    assert app.main(argv) == 0
+    note = tmp_path / "notes" / "idea" / "exp.md"
+    text = note.read_text()
+    assert "BEGIN GENERATED: analyze.redundancy_controls" in text
+    assert "BEGIN GENERATED: analyze.marginal" not in text  # nothing else runs
+    assert list(note.parent.glob("*.png")) == []
+    rows = [ln for ln in text.splitlines() if ln.startswith(("| z |", "| h |"))]
+    # Per space: same views, two half-to-half, two single-view setups + reliability.
+    assert len(rows) == 2 * 6
+    same_views = next(ln for ln in rows if ln.startswith("| z | same views"))
+    assert "| 8 |" in same_views  # permutations
+    assert app.main(argv) == 0
+    assert note.read_text() == text  # idempotent
+
+
+def test_analyze_redundancy_controls_needs_a_run() -> None:
+    with pytest.raises(SystemExit):
+        _load_app().main(["--sweep", "x", "--note", "n.md", "--redundancy-controls"])
+
+
 @pytest.mark.slow  # renders PNGs through headless Chrome
 def test_analyze_renders_figures_into_note(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fake_run: pathlib.Path
