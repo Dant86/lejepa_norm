@@ -104,6 +104,8 @@ class EvalConfig:
     num_bootstrap: int = 1000
     # Kernel ridge (redundancy, residuals) runs on at most this many images.
     max_kernel_images: int = 4000
+    # Permutations of the radius in the redundancy controls.
+    num_permutations: int = 500
 
 
 @dataclasses.dataclass

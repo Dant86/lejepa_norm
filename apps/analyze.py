@@ -10,6 +10,11 @@ the logs hold per-view-type statistics (global vs local views), also their
 columns and curves of kappa_z and ||z|| mean per view type. It needs no embedding
 dumps and can be run while the sweep is still training.
 
+With `--redundancy-controls` (per-run mode), only the controls of the redundancy
+result are run (permutation null, cross-view regressions, F-test; see
+`lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
+section; no other analysis runs and no figures are made.
+
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
 `LEJEPA_NORM_RUNS_DIR/<run-name>/`), then writes markdown tables into generated
@@ -19,6 +24,8 @@ generated sections in place.
 Examples:
     python apps/analyze.py --config configs/base.yaml --run-name a_l0.05_s0 \
         --note radius-conditional/variant_a.md --set eval.num_bootstrap=200
+    python apps/analyze.py --config configs/base.yaml --run-name a_l0.05_s0 \
+        --note radius-conditional/variant_a_controls.md --redundancy-controls
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
 """
@@ -35,6 +42,7 @@ from lejepa_norm import paths
 from lejepa_norm import plotting
 from lejepa_norm import reporting
 from lejepa_norm.eval import analysis
+from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sweep
@@ -72,9 +80,16 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-figures", action="store_true", help="Skip PNG export (no Chrome)."
     )
+    parser.add_argument(
+        "--redundancy-controls",
+        action="store_true",
+        help="Per-run mode only: run just the controls of the redundancy result.",
+    )
     args = parser.parse_args(argv)
     if args.run_name is not None and args.config is None:
         parser.error("--run-name requires --config")
+    if args.redundancy_controls and args.run_name is None:
+        parser.error("--redundancy-controls requires --run-name")
     return args
 
 
@@ -239,11 +254,41 @@ def _run_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_redundancy_controls(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    test = dumps.load_set(
+        dumps.set_dir(locations.embed_dir, args.run_name, dumps.STL10_TEST)
+    )
+    if test is None:
+        print(f"no {dumps.STL10_TEST} dump for {args.run_name}", file=sys.stderr)
+        return 1
+    rows = controls.run_redundancy_controls(test, cfg.eval, cfg.seed)
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.redundancy_controls",
+        f"### Redundancy controls (run `{args.run_name}`)\n\n"
+        "Held-out R^2 of the radius from the direction (nested-CV kernel ridge, "
+        "same images as the redundancy table) against a permutation null "
+        f"({cfg.eval.num_permutations} shuffles of the radius through the identical "
+        "pipeline; p = (1 + #{null >= observed}) / (1 + permutations)), with "
+        "cross-view setups that share no view between input and target, and the "
+        "classical OLS F-test (linear, in-sample). The reference row is the squared "
+        "correlation of the two half-view means of rho_bar.\n\n"
+        + reporting.markdown_table(rows),
+    )
+    print(f"wrote {note}")
+    return 0
+
+
 def main(argv: collections.abc.Sequence[str]) -> int:
     """Runs the analysis app; returns a process exit code."""
     args = _parse(argv)
     if args.sweep is not None:
         return _run_sweep(args)
+    if args.redundancy_controls:
+        return _run_redundancy_controls(args)
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
     note = locations.notes_dir / args.note

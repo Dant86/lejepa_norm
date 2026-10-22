@@ -61,6 +61,45 @@ def test_redundancy_r2_high_when_radius_is_smooth_function_of_direction() -> Non
     assert kernel_fit.r2 > linear_fit.r2 + 0.2
 
 
+def test_nested_kernel_ridge_reuses_spectra_across_targets() -> None:
+    u = _sphere(300, 8, 11)
+    rng = _rng(12)
+    y1, y2 = rng.normal(size=300), numpy.sin(3 * u[:, 0])
+    model = redundancy.NestedKernelRidge(u, "exp_dot", 5, _rng(13))
+    for y in (y1, y2, y1):
+        expected = redundancy.kernel_ridge_cv(u, y, "exp_dot", 5, _rng(13))
+        got = model.fit(y)
+        assert got.r2 == pytest.approx(expected.r2, abs=1e-12)
+        numpy.testing.assert_allclose(got.predictions, expected.predictions)
+        assert got.params == expected.params
+    with pytest.raises(ValueError):
+        model.fit(y1[:-1])
+
+
+def test_permutation_test_separates_dependent_from_independent_radius() -> None:
+    u = _sphere(400, 6, 14)
+    model = redundancy.NestedKernelRidge(u, "exp_dot", 5, _rng(15))
+    dependent = numpy.sin(3 * u[:, 0]) + 0.1 * _rng(16).normal(size=400)
+    test = redundancy.permutation_test(model, dependent, 30, _rng(17))
+    assert test.observed > 0.8
+    assert abs(test.null.mean()) < 0.03 and test.null.max() < 0.1
+    assert test.p_value == pytest.approx(1 / 31)  # smallest attainable
+
+    independent = _rng(18).normal(size=400)
+    test = redundancy.permutation_test(model, independent, 30, _rng(19))
+    assert test.p_value > 0.05
+    assert test.p_value == pytest.approx((1 + (test.null >= test.observed).sum()) / 31)
+
+
+def test_f_test_detects_linear_dependence_and_not_noise() -> None:
+    u = _sphere(500, 5, 20)
+    noise = _rng(21).normal(size=500)
+    linear = redundancy.f_test(u, 2 * u[:, 0] - u[:, 1] + 0.5 * noise)
+    assert linear.p_value < 1e-10 and linear.r2 > 0.8
+    assert (linear.df1, linear.df2) == (5, 494)
+    assert redundancy.f_test(u, noise).p_value > 0.01
+
+
 def test_class_baseline_explains_class_driven_radius() -> None:
     rng = _rng(8)
     labels = rng.integers(0, 10, 2000)

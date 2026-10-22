@@ -45,3 +45,5 @@ eval:
   cv_folds: 5
   num_bootstrap: 1000
   max_kernel_images: 4000
+  # Permutations of the radius in the redundancy controls (`analyze --redundancy-controls`).
+  num_permutations: 500
