@@ -5,8 +5,10 @@ Two modes. **Per-run** (`--run-name`): all analyses of one run, below. **Sweep**
 grouped by lambda (resolved configs, not names): a per-lambda table (mean ± std
 over seeds at the last epoch all seeds reached, with the N(0, I) targets), a
 per-run progress table and, with Chrome, curves over epochs (mean with min-max
-over seeds) of kappa_z, ||z|| mean and standard deviation, and k-NN accuracy. It
-needs no embedding dumps and can be run while the sweep is still training.
+over seeds) of kappa_z, ||z|| mean and standard deviation, and k-NN accuracy; when
+the logs hold per-view-type statistics (global vs local views), also their
+columns and curves of kappa_z and ||z|| mean per view type. It needs no embedding
+dumps and can be run while the sweep is still training.
 
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
@@ -166,9 +168,22 @@ def _sweep_figures(
         (sweep.Z_NORM_STD, "z_norm_std", "std of ||z|| during training", None),
         ("knn_acc_h", "knn_acc_h", "online k-NN accuracy (backbone h)", None),
     )
+    present = {key for key, _ in sweep.summary_keys(runs)}
+    plots += tuple(
+        (key, name, f"{name} during training", reference)
+        for key, name, reference in (
+            (sweep.KAPPA_Z_GLOBAL, "kappa_z_global", 1.0),
+            (sweep.KAPPA_Z_LOCAL, "kappa_z_local", 1.0),
+            (sweep.Z_NORM_MEAN_GLOBAL, "z_norm_mean_global", None),
+            (sweep.Z_NORM_MEAN_LOCAL, "z_norm_mean_local", None),
+        )
+        if key in present
+    )
     references = {
         "z_norm_mean": math.sqrt(d - 0.5),
         "z_norm_std": math.sqrt(0.5),
+        "z_norm_mean_global": math.sqrt(d - 0.5),
+        "z_norm_mean_local": math.sqrt(d - 0.5),
     }
     links: list[str] = []
     for key, name, title, reference in plots:

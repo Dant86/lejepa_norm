@@ -7,6 +7,14 @@ Curves are taken over the epochs that **every** seed of a lambda has reached, so
 partially finished sweep is summarized honestly; the per-run table shows how far
 each run got.
 
+Logs written by newer training code also hold per-view-type statistics
+(`kappa_z_global`, `kappa_z_local`, `z_norm_mean_global`, `z_norm_mean_local`,
+`z_norm_std_global`, `z_norm_std_local`, as `*_epoch_mean`): the radial spread of
+the global and of the local views separately, which is what SIGReg controls (the
+pooled `kappa_z` also reflects global and local views sitting at different radii).
+When any run has them, they get extra columns in the per-lambda summary and extra
+curves; logs without them are summarized exactly as before.
+
 Targets under an exact N(0, I_d) projector marginal: `kappa = 1`, `||z||` mean
 `sqrt(d - 1/2)` and standard deviation `sqrt(1/2)` (chi_d, large-d).
 """
@@ -35,6 +43,19 @@ SUMMARY_KEYS = (
     ("knn_acc_z", "knn_acc_z"),
     ("loss_dist_epoch_mean", "loss_dist"),
     ("loss_inv_epoch_mean", "loss_inv"),
+)
+KAPPA_Z_GLOBAL = "kappa_z_global_epoch_mean"
+KAPPA_Z_LOCAL = "kappa_z_local_epoch_mean"
+Z_NORM_MEAN_GLOBAL = "z_norm_mean_global_epoch_mean"
+Z_NORM_MEAN_LOCAL = "z_norm_mean_local_epoch_mean"
+# Per-view-type statistics (absent from logs of older training code).
+VIEW_TYPE_KEYS = (
+    (KAPPA_Z_GLOBAL, "kappa_z_global"),
+    (KAPPA_Z_LOCAL, "kappa_z_local"),
+    (Z_NORM_MEAN_GLOBAL, "z_norm_mean_global"),
+    (Z_NORM_MEAN_LOCAL, "z_norm_mean_local"),
+    ("z_norm_std_global_epoch_mean", "z_norm_std_global"),
+    ("z_norm_std_local_epoch_mean", "z_norm_std_local"),
 )
 
 
@@ -77,6 +98,16 @@ class Curve:
     mean: list[float]
     low: list[float]
     high: list[float]
+
+
+def summary_keys(runs: list[Run]) -> tuple[tuple[str, str], ...]:
+    """`SUMMARY_KEYS`, plus `VIEW_TYPE_KEYS` that at least one run has logged."""
+    extra = tuple(
+        (key, title)
+        for key, title in VIEW_TYPE_KEYS
+        if any(key in values for run in runs for values in run.epochs.values())
+    )
+    return SUMMARY_KEYS + extra
 
 
 def _numeric(value: typing.Any) -> bool:
@@ -181,19 +212,23 @@ def summary_rows(runs: list[Run]) -> list[dict[str, str | int]]:
     if not runs:
         return rows
     d = runs[0].embed_dim
-    rows.append(
-        {
-            "lambda": "target (N(0, I))",
-            "seeds": "",
-            "epoch": "",
-            "kappa_z": "1",
-            "z_norm_mean": f"{math.sqrt(d - 0.5):.4g}",
-            "z_norm_std": f"{math.sqrt(0.5):.4g}",
-        }
-    )
+    keys = summary_keys(runs)
+    target: dict[str, str | int] = {
+        "lambda": "target (N(0, I))",
+        "seeds": "",
+        "epoch": "",
+        "kappa_z": "1",
+        "z_norm_mean": f"{math.sqrt(d - 0.5):.4g}",
+        "z_norm_std": f"{math.sqrt(0.5):.4g}",
+    }
+    targets = {"kappa": "1", "mean": f"{math.sqrt(d - 0.5):.4g}"}
+    for _, title in keys[len(SUMMARY_KEYS) :]:  # same targets for each view type
+        stat = "kappa" if title.startswith("kappa") else title.split("_")[2]
+        target[title] = targets.get(stat, f"{math.sqrt(0.5):.4g}")
+    rows.append(target)
     for lam, group in by_lambda(runs).items():
         row: dict[str, str | int] = {"lambda": f"{lam:g}", "seeds": len(group)}
-        for key, title in SUMMARY_KEYS:
+        for key, title in keys:
             final = _final(group, key)
             if final is not None:
                 row[title] = _mean_std(final[1])
@@ -206,6 +241,7 @@ def summary_rows(runs: list[Run]) -> list[dict[str, str | int]]:
 def run_rows(runs: list[Run]) -> list[dict[str, str | int | float]]:
     """One row per run: progress and its latest values."""
     rows: list[dict[str, str | int | float]] = []
+    keys = summary_keys(runs)
     for run in runs:
         if not run.epochs:
             status = "no epoch records"
@@ -220,7 +256,7 @@ def run_rows(runs: list[Run]) -> list[dict[str, str | int | float]]:
             "epochs": f"{run.last_epoch}/{run.target_epochs}",
             "status": status,
         }
-        for key, title in SUMMARY_KEYS:
+        for key, title in keys:
             # Latest available value (k-NN is only logged every few epochs).
             for epoch in sorted(run.epochs, reverse=True):
                 if key in run.epochs[epoch]:

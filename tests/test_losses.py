@@ -97,6 +97,24 @@ def test_kappa_on_gaussian_and_spherical_samples() -> None:
     assert float(diagnostics.kappa(sphere)) == pytest.approx(0.0, abs=1e-6)
 
 
+def test_per_view_type_kappa_is_small_when_only_the_pooled_one_is_large() -> None:
+    """Global and local views at different radii: pooling alone inflates kappa."""
+    d, n = 256, 4096
+    radii = {"global": 16.0, "local": 10.0}
+    samples: dict[str, torch.Tensor] = {}
+    for i, (name, radius) in enumerate(radii.items()):
+        # Gaussian-like in direction, radius ~ `radius` with a small relative spread.
+        direction = torch.nn.functional.normalize(
+            torch.randn(n, d, generator=_gen(20 + i)), dim=-1
+        )
+        scale = radius * (1 + 0.02 * torch.randn(n, 1, generator=_gen(30 + i)))
+        samples[name] = direction * scale
+    pooled = float(diagnostics.kappa(torch.cat(list(samples.values()))))
+    per_type = {k: float(diagnostics.kappa(v)) for k, v in samples.items()}
+    assert pooled > 10 * max(per_type.values())
+    assert max(per_type.values()) < 1.0 < pooled
+
+
 def test_lejepa_loss_combines_terms_and_reports_diagnostics() -> None:
     cfg = config.LossConfig(lambda_=0.25, num_slices=256)
     loss_fn = lejepa.build_loss(cfg)

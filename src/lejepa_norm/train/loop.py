@@ -19,6 +19,16 @@ warmup over `warmup_epochs`, then cosine decay to 0 (updated every step). Weight
 decay applies to weight matrices and conv kernels only, not to biases or
 normalization parameters.
 
+Logged scalars (`STAT_KEYS`; per step, and as `<key>_epoch_mean` per epoch): the
+losses, and `kappa_*` / `*_norm_mean` / `*_norm_std` of the projector output `z` and
+the backbone feature `h`, pooled over all views. The per-view-type variants
+`<stat>_global` and `<stat>_local` (e.g. `kappa_z_global`, `h_norm_std_local`) pool
+only the global (2 x batch samples) or only the local (4 x batch) views, which is
+what SIGReg controls; pooled statistics mix views at different radii and can show
+a large spread even when every view type is tight. `kappa` is
+`Var(||x||^2) / (2 d)` (`losses.diagnostics`). `*_local` is NaN (logged as null)
+without local views.
+
 Outputs in `run_dir`: `metrics.jsonl` (see `metrics_log`) and checkpoints in the
 `models.checkpoint` format: `epoch_XXXX.pt` every `checkpoint_every_epochs` and at
 the end, with `last.pt` always holding the most recent one.
@@ -32,6 +42,12 @@ forward to the interrupted step, and the states of the augmentation generator an
 of torch's global RNG (SIGReg directions) are restored, so a resumed run sees the
 same views and directions as an uninterrupted one (bit-identical results on CPU;
 on CUDA, non-deterministic kernels can still differ at float precision).
+
+A `resume.pt` written before the per-view-type statistics existed (its `epoch_sum`
+has fewer entries than `STAT_KEYS`) still loads: the older statistics continue as
+usual, the per-view-type ones start accumulating at the resume point, so the
+`*_global` / `*_local` epoch means are omitted from the one epoch record that
+spans the resume (step records and all later epochs have them).
 """
 
 import dataclasses
@@ -74,7 +90,24 @@ STAT_KEYS = (
     "z_norm_std",
     "h_norm_mean",
     "h_norm_std",
+    # Per view type; appended after the pooled keys so older `resume.pt` epoch sums
+    # remain a prefix of the current layout.
+    "kappa_z_global",
+    "kappa_z_local",
+    "z_norm_mean_global",
+    "z_norm_mean_local",
+    "z_norm_std_global",
+    "z_norm_std_local",
+    "kappa_h_global",
+    "kappa_h_local",
+    "h_norm_mean_global",
+    "h_norm_mean_local",
+    "h_norm_std_global",
+    "h_norm_std_local",
 )
+# Leading `STAT_KEYS` that `resume.pt` files from before the per-view-type
+# statistics hold in `epoch_sum`.
+LEGACY_NUM_STATS = 9
 
 
 @dataclasses.dataclass(frozen=True)
@@ -153,6 +186,25 @@ def _norm_stats(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return norms.mean(), norms.std()
 
 
+def _group_stats(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`(kappa, norm mean, norm std)` of `(N, d)` samples; NaN if `N < 2`."""
+    if x.shape[0] < 2:
+        nan = torch.full((), math.nan, device=x.device)
+        return nan, nan, nan
+    mean, std = _norm_stats(x)
+    return diagnostics.kappa(x), mean, std
+
+
+def _view_type_stats(x: torch.Tensor, num_global_rows: int) -> list[torch.Tensor]:
+    """Stats of the global and local rows of `x`, in `STAT_KEYS` order.
+
+    Returns `[kappa_g, kappa_l, mean_g, mean_l, std_g, std_l]`.
+    """
+    kg, mg, sg = _group_stats(x[:num_global_rows])
+    kl, ml, sl = _group_stats(x[num_global_rows:])
+    return [kg, kl, mg, ml, sg, sl]
+
+
 def forward_views(
     backbone: nn.Module,
     projector: nn.Module,
@@ -179,13 +231,21 @@ def forward_views(
 
 
 def _step_stats(
-    h: torch.Tensor, z: torch.Tensor, loss_stats: dict[str, torch.Tensor]
+    h: torch.Tensor,
+    z: torch.Tensor,
+    loss_stats: dict[str, torch.Tensor],
+    num_global: int,
 ) -> torch.Tensor:
     """Stacks the `STAT_KEYS` scalars of one step into a detached fp32 vector."""
     flat_z = z.detach().float().reshape(-1, z.shape[-1])
     flat_h = h.detach().float()
     z_mean, z_std = _norm_stats(flat_z)
     h_mean, h_std = _norm_stats(flat_h)
+    # Both are view-major with the global views first.
+    global_rows = num_global * z.shape[1]
+    by_type = _view_type_stats(flat_z, global_rows) + _view_type_stats(
+        flat_h, global_rows
+    )
     return torch.stack(
         [
             loss_stats["total"].float(),
@@ -197,13 +257,16 @@ def _step_stats(
             z_std,
             h_mean,
             h_std,
+            *by_type,
         ]
     )
 
 
-def _as_record(values: torch.Tensor, suffix: str = "") -> dict[str, float]:
+def _as_record(
+    values: torch.Tensor, suffix: str = "", num_keys: int = len(STAT_KEYS)
+) -> dict[str, float]:
     floats = typing.cast(list[float], values.tolist())  # pyright: ignore[reportUnknownMemberType]
-    items = zip(STAT_KEYS, floats, strict=True)
+    items = zip(STAT_KEYS[:num_keys], floats[:num_keys], strict=True)
     return {f"{key}{suffix}": float(value) for key, value in items}
 
 
@@ -340,11 +403,14 @@ def train(
         epoch_sum = torch.zeros(len(STAT_KEYS), device=device)
         elapsed_before = 0.0
         epoch_step = 0
+        kept_stats = len(STAT_KEYS)  # statistics that have a full-epoch mean
         if resume is not None and epoch == start_epoch and skip > 0:
             epoch_step = skip
             elapsed_before = resume.epoch_elapsed_s
             if resume.epoch_sum is not None:
-                epoch_sum += resume.epoch_sum.to(device)
+                saved = resume.epoch_sum.to(device)
+                epoch_sum[: saved.numel()] += saved
+                kept_stats = min(saved.numel(), len(STAT_KEYS))  # older state: fewer
         order = epoch_permutation(cfg.seed, epoch, len(images))
         index_batches = (
             order[s * tc.batch_size : (s + 1) * tc.batch_size]
@@ -371,7 +437,7 @@ def train(
                 step += 1
                 epoch_step += 1
                 interval_steps += 1
-                stats = _step_stats(h, z, loss_stats)
+                stats = _step_stats(h, z, loss_stats, num_global)
                 epoch_sum += stats
                 if step == 1 or step % tc.log_every_steps == 0:
                     record = _as_record(stats)  # syncs with the device
@@ -403,7 +469,7 @@ def train(
             "kind": "epoch",
             "step": step,
             "epoch": epoch,
-            **_as_record(epoch_sum / steps_per_epoch, "_epoch_mean"),
+            **_as_record(epoch_sum / steps_per_epoch, "_epoch_mean", kept_stats),
             "epoch_time_s": epoch_time,
             "images_per_s": steps_per_epoch * tc.batch_size / epoch_time,
         }
