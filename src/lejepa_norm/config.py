@@ -106,6 +106,8 @@ class EvalConfig:
     max_kernel_images: int = 4000
     # Permutations of the radius in the redundancy controls.
     num_permutations: int = 500
+    # Radius randomizations (permutations) per condition of the k-NN study.
+    num_randomizations: int = 10
 
 
 @dataclasses.dataclass

@@ -15,6 +15,13 @@ result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
 section; no other analysis runs and no figures are made.
 
+With `--randomize-radius PREFIX`, the radius of z-space embeddings is randomized
+before a Euclidean k-NN on the STL-10 labels (bank `stl10_train` dump, queries
+`stl10_test` dump; see `lejepa_norm.eval.randomization`) for every run `PREFIX_*`
+that has both dumps; runs missing a dump are listed in the note, not dropped
+silently. The note gets per-lambda (mean ± std over seeds) and per-run tables and
+a figure.
+
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
 `LEJEPA_NORM_RUNS_DIR/<run-name>/`), then writes markdown tables into generated
@@ -28,6 +35,9 @@ Examples:
         --note radius-conditional/variant_a_controls.md --redundancy-controls
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
+    python apps/analyze.py --config configs/base.yaml \
+        --randomize-radius radius_marginal \
+        --note radius_randomization/knn_radius_randomization.md
 """
 
 import argparse
@@ -44,6 +54,7 @@ from lejepa_norm import reporting
 from lejepa_norm.eval import analysis
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
+from lejepa_norm.eval import randomization
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sweep
 
@@ -64,11 +75,20 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Writes all analyses of one run into an experiment note."
     )
-    parser.add_argument("--config", type=pathlib.Path, help="Per-run mode only.")
+    parser.add_argument(
+        "--config",
+        type=pathlib.Path,
+        help="Per-run and --randomize-radius modes.",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--run-name", help="Analyze one run (needs --config).")
     mode.add_argument(
         "--sweep", metavar="PREFIX", help="Summarize all runs named PREFIX_*."
+    )
+    mode.add_argument(
+        "--randomize-radius",
+        metavar="PREFIX",
+        help="k-NN with randomized radius for runs PREFIX_* (needs --config).",
     )
     parser.add_argument(
         "--note",
@@ -88,6 +108,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.run_name is not None and args.config is None:
         parser.error("--run-name requires --config")
+    if args.randomize_radius is not None and args.config is None:
+        parser.error("--randomize-radius requires --config")
     if args.redundancy_controls and args.run_name is None:
         parser.error("--redundancy-controls requires --run-name")
     return args
@@ -282,11 +304,135 @@ def _run_redundancy_controls(args: argparse.Namespace) -> int:
     return 0
 
 
+def _randomization_figures(
+    results: list[randomization.RunResult],
+    note: pathlib.Path,
+    chrome: pathlib.Path | None,
+) -> list[str]:
+    prefix = note.parent / note.stem
+    links: list[str] = []
+    for view_kind in dict.fromkeys(r.view_kind for r in results):
+        series = {
+            condition: plotting.Series(
+                x=lams,
+                y=means,
+                low=[m - s for m, s in zip(means, stds, strict=True)],
+                high=[m + s for m, s in zip(means, stds, strict=True)],
+            )
+            for condition, (lams, means, stds) in randomization.accuracy_by_lambda(
+                results, view_kind
+            ).items()
+        }
+        fig = plotting.line_plot(
+            series,
+            f"k-NN accuracy with randomized radius (z, {view_kind})",
+            "lambda",
+            "accuracy (mean ± std over seeds)",
+        )
+        slug = "center" if view_kind == randomization.CENTER else "augmented_mean"
+        out = plotting.export_png(fig, f"{prefix}_knn_accuracy_{slug}.png", chrome)
+        links.append(
+            reporting.image_link(
+                out, note, f"k-NN accuracy per condition ({view_kind})"
+            )
+        )
+    return links
+
+
+def _run_randomize_radius(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    runs = sweep.load_runs(locations.runs_dir, args.randomize_radius)
+    results: list[randomization.RunResult] = []
+    diagnostics: list[dict[str, str | int | float]] = []
+    skipped: list[dict[str, str | int | float]] = []
+    for run in runs:
+        bank = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, run.name, dumps.STL10_TRAIN)
+        )
+        query = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, run.name, dumps.STL10_TEST)
+        )
+        if bank is None or query is None:
+            missing = [
+                name
+                for name, shard in (
+                    (dumps.STL10_TRAIN, bank),
+                    (dumps.STL10_TEST, query),
+                )
+                if shard is None
+            ]
+            skipped.append({"run": run.name, "missing dump": ", ".join(missing)})
+            print(f"skipping {run.name}: no {', '.join(missing)} dump", file=sys.stderr)
+            continue
+        for view_kind, evaluation in randomization.evaluate_shards(
+            bank, query, cfg.eval, cfg.seed
+        ).items():
+            results.append(
+                randomization.RunResult(
+                    run.name, run.lam, run.seed, view_kind, evaluation.rows
+                )
+            )
+            diagnostics += [
+                {"run": run.name, "view": view_kind, **row} for row in evaluation.model
+            ]
+        print(f"done {run.name}", file=sys.stderr)
+    if not results:
+        print(f"no run named {args.randomize_radius}_* has both dumps", file=sys.stderr)
+        return 1
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.randomization_summary",
+        "### k-NN accuracy with randomized radius: mean ± std over training seeds, "
+        "per lambda\n\n"
+        f"Euclidean k-NN (k = {cfg.eval.knn_k}) in z; bank = STL-10 train, queries = "
+        "STL-10 test; the same transformation type is applied to bank and queries "
+        f"independently. The randomized conditions use {cfg.eval.num_randomizations} "
+        "random draws per run (`repeat sd` is their standard deviation within a "
+        "run). `change vs baseline` is the per-seed difference to the unmodified "
+        "embeddings.\n\n" + reporting.markdown_table(randomization.aggregate(results)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.randomization_runs",
+        "### Per-run accuracies\n\n"
+        + reporting.markdown_table(randomization.per_run_rows(results)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.randomization_model",
+        "### Direction -> log-radius regression used by the residual shuffle\n\n"
+        + reporting.markdown_table(diagnostics),
+    )
+    reporting.update_section(
+        note,
+        "analyze.randomization_skipped",
+        "### Runs without the required dumps\n\n"
+        + (
+            reporting.markdown_table(skipped)
+            if skipped
+            else "None: every run of the prefix has `stl10_train` and `stl10_test`."
+        ),
+    )
+    if not args.no_figures:
+        links = _randomization_figures(results, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note,
+            "analyze.randomization_figures",
+            "### Figures\n\n" + "\n\n".join(links),
+        )
+    print(f"wrote {note}")
+    return 0
+
+
 def main(argv: collections.abc.Sequence[str]) -> int:
     """Runs the analysis app; returns a process exit code."""
     args = _parse(argv)
     if args.sweep is not None:
         return _run_sweep(args)
+    if args.randomize_radius is not None:
+        return _run_randomize_radius(args)
     if args.redundancy_controls:
         return _run_redundancy_controls(args)
     cfg = config.load_config(args.config, args.overrides)
