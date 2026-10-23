@@ -107,7 +107,10 @@ class EvalConfig:
     # Permutations of the radius in the redundancy controls.
     num_permutations: int = 500
     # Radius randomizations (permutations) per condition of the k-NN study.
-    num_randomizations: int = 10
+    num_randomizations: int = 5
+    # Equivalence margin (accuracy units, 0.005 = 0.5 points) of the same study;
+    # fixed before the results were looked at.
+    equivalence_margin: float = 0.005
 
 
 @dataclasses.dataclass

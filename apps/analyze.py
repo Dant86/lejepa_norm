@@ -16,11 +16,12 @@ result are run (permutation null, cross-view regressions, F-test; see
 section; no other analysis runs and no figures are made.
 
 With `--randomize-radius PREFIX`, the radius of z-space embeddings is randomized
-before a Euclidean k-NN on the STL-10 labels (bank `stl10_train` dump, queries
-`stl10_test` dump; see `lejepa_norm.eval.randomization`) for every run `PREFIX_*`
-that has both dumps; runs missing a dump are listed in the note, not dropped
-silently. The note gets per-lambda (mean ± std over seeds) and per-run tables and
-a figure.
+before k-NN, linear-probe and MLP classification of the STL-10 labels (bank:
+`stl10_train` dump, test set: `stl10_test` dump; z only; see
+`lejepa_norm.eval.randomization`) for every run `PREFIX_*` that has both dumps;
+runs missing a dump are listed in the note, not dropped silently. The note gets
+paired-bootstrap differences against the unmodified baseline with an equivalence
+verdict (margin `eval.equivalence_margin`), accuracy tables and figures.
 
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
@@ -37,7 +38,7 @@ Examples:
         --note radius_marginal/lambda_sweep.md
     python apps/analyze.py --config configs/base.yaml \
         --randomize-radius radius_marginal \
-        --note radius_randomization/knn_radius_randomization.md
+        --note radius_randomization/radius_randomization.md
 """
 
 import argparse
@@ -46,6 +47,8 @@ import math
 import pathlib
 import sys
 import typing
+
+import numpy
 
 from lejepa_norm import config
 from lejepa_norm import paths
@@ -305,37 +308,40 @@ def _run_redundancy_controls(args: argparse.Namespace) -> int:
 
 
 def _randomization_figures(
-    results: list[randomization.RunResult],
+    comparisons: list[randomization.Comparison],
     note: pathlib.Path,
     chrome: pathlib.Path | None,
 ) -> list[str]:
+    """One figure per reader: paired accuracy change vs lambda, with 95% CIs."""
     prefix = note.parent / note.stem
     links: list[str] = []
-    for view_kind in dict.fromkeys(r.view_kind for r in results):
-        series = {
-            condition: plotting.Series(
-                x=lams,
-                y=means,
-                low=[m - s for m, s in zip(means, stds, strict=True)],
-                high=[m + s for m, s in zip(means, stds, strict=True)],
-            )
-            for condition, (lams, means, stds) in randomization.accuracy_by_lambda(
-                results, view_kind
-            ).items()
-        }
+    for reader in randomization.READERS:
+        series: dict[str, plotting.Series] = {}
+        for protocol in randomization.PROTOCOLS:
+            for condition in randomization.CONDITIONS[1:]:
+                rows = [
+                    c
+                    for c in comparisons
+                    if c.reader == reader
+                    and c.protocol == protocol
+                    and c.condition == condition
+                ]
+                series[f"{condition} ({protocol})"] = plotting.Series(
+                    x=[c.lam for c in rows],
+                    y=[100 * c.difference for c in rows],
+                    low=[100 * c.ci95[0] for c in rows],
+                    high=[100 * c.ci95[1] for c in rows],
+                )
         fig = plotting.line_plot(
             series,
-            f"k-NN accuracy with randomized radius (z, {view_kind})",
+            f"Accuracy change vs baseline, {reader} (z, 95% paired bootstrap CI)",
             "lambda",
-            "accuracy (mean ± std over seeds)",
+            "accuracy change (points)",
+            reference=0.0,
         )
-        slug = "center" if view_kind == randomization.CENTER else "augmented_mean"
-        out = plotting.export_png(fig, f"{prefix}_knn_accuracy_{slug}.png", chrome)
-        links.append(
-            reporting.image_link(
-                out, note, f"k-NN accuracy per condition ({view_kind})"
-            )
-        )
+        slug = "".join(ch if ch.isalnum() else "_" for ch in reader.split(" (")[0])
+        out = plotting.export_png(fig, f"{prefix}_change_{slug}.png", chrome)
+        links.append(reporting.image_link(out, note, f"accuracy change, {reader}"))
     return links
 
 
@@ -365,33 +371,50 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
             skipped.append({"run": run.name, "missing dump": ", ".join(missing)})
             print(f"skipping {run.name}: no {', '.join(missing)} dump", file=sys.stderr)
             continue
-        for view_kind, evaluation in randomization.evaluate_shards(
-            bank, query, cfg.eval, cfg.seed
-        ).items():
-            results.append(
-                randomization.RunResult(
-                    run.name, run.lam, run.seed, view_kind, evaluation.rows
-                )
-            )
-            diagnostics += [
-                {"run": run.name, "view": view_kind, **row} for row in evaluation.model
-            ]
+        evaluation = randomization.evaluate_shards(bank, query, cfg.eval, cfg.seed)
+        results.append(randomization.RunResult(run.name, run.lam, run.seed, evaluation))
+        diagnostics += [
+            {
+                "run": run.name,
+                "MLP weight decay": evaluation.weight_decay,
+                **row,
+            }
+            for row in evaluation.model
+        ]
         print(f"done {run.name}", file=sys.stderr)
     if not results:
         print(f"no run named {args.randomize_radius}_* has both dumps", file=sys.stderr)
         return 1
+    margin = cfg.eval.equivalence_margin
+    comparisons = randomization.compare(
+        results,
+        margin,
+        cfg.eval.num_bootstrap,
+        numpy.random.default_rng(cfg.seed),
+    )
     note = locations.notes_dir / args.note
     reporting.update_section(
         note,
-        "analyze.randomization_summary",
-        "### k-NN accuracy with randomized radius: mean ± std over training seeds, "
-        "per lambda\n\n"
-        f"Euclidean k-NN (k = {cfg.eval.knn_k}) in z; bank = STL-10 train, queries = "
-        "STL-10 test; the same transformation type is applied to bank and queries "
-        f"independently. The randomized conditions use {cfg.eval.num_randomizations} "
-        "random draws per run (`repeat sd` is their standard deviation within a "
-        "run). `change vs baseline` is the per-seed difference to the unmodified "
-        "embeddings.\n\n" + reporting.markdown_table(randomization.aggregate(results)),
+        "analyze.randomization_comparison",
+        "### Paired accuracy change vs the baseline, per lambda\n\n"
+        f"z-space, center views; bank = STL-10 train, test set = STL-10 test; the "
+        "same transformation is applied to bank and test set independently. "
+        "Differences are in accuracy points (condition minus baseline on the same "
+        "test images), averaged over training seeds; intervals are paired "
+        f"bootstrap percentile intervals ({cfg.eval.num_bootstrap} replicates, test "
+        "images resampled within each seed). Verdict, with the equivalence margin "
+        f"set to ±{100 * margin:g} points before looking at results: `equivalent` "
+        "if the 90% interval (TOST at 5%) lies inside the margin, `different` if "
+        "not equivalent and the 95% interval excludes 0, otherwise `inconclusive`. "
+        f"Shuffle repeats ({cfg.eval.num_randomizations} per randomized condition) "
+        "only average out shuffle noise; they are not part of the interval.\n\n"
+        + reporting.markdown_table(randomization.comparison_rows(comparisons)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.randomization_accuracy",
+        "### Accuracy: mean ± std over training seeds, per lambda\n\n"
+        + reporting.markdown_table(randomization.accuracy_rows(results)),
     )
     reporting.update_section(
         note,
@@ -416,7 +439,7 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
         ),
     )
     if not args.no_figures:
-        links = _randomization_figures(results, note, locations.kaleido_chrome)
+        links = _randomization_figures(comparisons, note, locations.kaleido_chrome)
         reporting.update_section(
             note,
             "analyze.randomization_figures",

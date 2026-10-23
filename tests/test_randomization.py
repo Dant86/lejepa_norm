@@ -81,85 +81,156 @@ def test_euclidean_knn_matches_brute_force_and_cosine_on_unit_vectors() -> None:
     )
 
 
-def _evaluate(label_in_direction: bool, label_in_radius: bool) -> dict[str, float]:
+def _cells(
+    label_in_direction: bool, label_in_radius: bool, readers: tuple[str, ...]
+) -> randomization.Evaluation:
     bank, by = _embeddings(10, label_in_direction, label_in_radius)
     query, qy = _embeddings(11, label_in_direction, label_in_radius)
-    evaluation = randomization.evaluate(
-        bank, by, query, qy, k=5, num_repeats=3, cv_folds=3, seed=0
+    return randomization.evaluate(
+        bank, by, query, qy, k=5, num_repeats=3, cv_folds=3, seed=0, readers=readers
     )
-    assert [r["condition"] for r in evaluation.rows] == list(randomization.CONDITIONS)
-    assert [r["repeats"] for r in evaluation.rows] == [1, 3, 3, 1, 1]
-    return {str(r["condition"]): float(r["accuracy"]) for r in evaluation.rows}
+
+
+def _acc(ev: randomization.Evaluation, reader: str, protocol: str, cond: str) -> float:
+    return float(ev.cells[reader, protocol, cond].correct.mean())
+
+
+FAST = (randomization.KNN_EUCLIDEAN, randomization.KNN_COSINE, randomization.LINEAR)
 
 
 def test_radius_only_labels_are_destroyed_by_every_randomization() -> None:
-    acc = _evaluate(label_in_direction=False, label_in_radius=True)
-    assert acc[randomization.BASELINE] > 0.9
+    ev = _cells(False, True, FAST)
     chance = 1 / CLASSES
-    for condition in (randomization.PERMUTE, randomization.CONSTANT):
-        assert acc[condition] < chance + 0.15, condition
-    # The radius is not predictable from direction here, so the residual carries
-    # the whole class signal and shuffling it also destroys it.
-    assert acc[randomization.RESIDUAL] < chance + 0.15
+    for reader in (randomization.KNN_EUCLIDEAN, randomization.LINEAR):
+        for protocol in randomization.PROTOCOLS:
+            assert _acc(ev, reader, protocol, randomization.BASELINE) > 0.9
+            for cond in randomization.CONDITIONS[1:]:
+                assert _acc(ev, reader, protocol, cond) < chance + 0.15, (
+                    reader,
+                    protocol,
+                    cond,
+                )
+    # Repeats: 3 for randomized conditions, 1 for deterministic ones.
+    cell = ev.cells[randomization.LINEAR, randomization.RETRAIN, randomization.PERMUTE]
+    assert len(cell.repeat_accuracy) == 3
+    assert (
+        len(
+            ev.cells[
+                randomization.LINEAR, randomization.FROZEN, "baseline"
+            ].repeat_accuracy
+        )
+        == 1
+    )
 
 
-def test_direction_only_labels_survive_constant_radius_and_match_cosine() -> None:
-    acc = _evaluate(label_in_direction=True, label_in_radius=False)
-    assert acc[randomization.BASELINE] > 0.9
-    assert acc[randomization.CONSTANT] > 0.9
-    assert acc[randomization.CONSTANT] == pytest.approx(acc[randomization.COSINE])
+def test_direction_only_labels_survive_and_cosine_is_radius_invariant() -> None:
+    ev = _cells(True, False, FAST)
+    for reader in FAST:
+        for protocol in randomization.PROTOCOLS:
+            assert _acc(ev, reader, protocol, randomization.CONSTANT) > 0.9
+    cosine = randomization.KNN_COSINE
+    for protocol in randomization.PROTOCOLS:
+        base = ev.cells[cosine, protocol, randomization.BASELINE].correct
+        for cond in randomization.CONDITIONS[1:]:
+            numpy.testing.assert_array_equal(
+                ev.cells[cosine, protocol, cond].correct, base
+            )
+    # Euclidean k-NN on unit vectors is the cosine k-NN.
+    for protocol in randomization.PROTOCOLS:
+        numpy.testing.assert_array_equal(
+            ev.cells[
+                randomization.KNN_EUCLIDEAN, protocol, randomization.CONSTANT
+            ].correct,
+            ev.cells[cosine, protocol, randomization.BASELINE].correct,
+        )
+
+
+def test_mlp_reader_runs_and_selects_a_weight_decay() -> None:
+    ev = _cells(True, False, (randomization.MLP,))
+    assert ev.weight_decay in randomization.MLP_WEIGHT_DECAYS
+    assert _acc(ev, randomization.MLP, randomization.RETRAIN, "baseline") > 0.9
 
 
 def test_radius_predictable_from_direction_survives_the_residual_shuffle() -> None:
-    """Radius = class signal fully carried by the direction: keeping the predicted
-    part keeps the class signal, a full permutation of radii does not hurt more
-    than the metric noise it adds."""
+    """Class carried by the direction, radius a smooth function of the direction:
+    the held-out regression finds it and keeping the predicted part keeps accuracy."""
 
     def make(seed: int) -> tuple[numpy.ndarray, numpy.ndarray]:
         r = numpy.random.default_rng(seed)
         labels = r.integers(0, CLASSES, N)
         centers = numpy.random.default_rng(99).normal(size=(CLASSES, D))
         u = features.direction(0.3 * r.normal(size=(N, D)) + 3.0 * centers[labels])
-        # The radius is a smooth function of the direction plus little noise.
         log_r = 1.5 * u[:, 0] + 0.02 * r.normal(size=N)
         return u * numpy.exp(log_r)[:, None], labels
 
     (bank, by), (query, qy) = make(20), make(21)
-    evaluation = randomization.evaluate(
-        bank, by, query, qy, k=5, num_repeats=3, cv_folds=3, seed=0
+    ev = randomization.evaluate(
+        bank,
+        by,
+        query,
+        qy,
+        k=5,
+        num_repeats=3,
+        cv_folds=3,
+        seed=0,
+        readers=(randomization.KNN_EUCLIDEAN,),
     )
-    assert float(evaluation.model[0]["bank (out-of-fold)"]) > 0.8
-    assert float(evaluation.model[0]["queries (held out)"]) > 0.8
-    acc = {str(r["condition"]): float(r["accuracy"]) for r in evaluation.rows}
-    assert acc[randomization.RESIDUAL] >= acc[randomization.PERMUTE] - 0.02
-    assert acc[randomization.RESIDUAL] > 0.8
+    assert float(ev.model[0]["bank (out-of-fold)"]) > 0.8
+    assert float(ev.model[0]["test (held out)"]) > 0.8
+    knn = randomization.KNN_EUCLIDEAN
+    residual = _acc(ev, knn, randomization.RETRAIN, randomization.RESIDUAL)
+    permuted = _acc(ev, knn, randomization.RETRAIN, randomization.PERMUTE)
+    assert residual >= permuted - 0.02 and residual > 0.8
 
 
-def test_aggregate_and_series_group_by_lambda_and_seed() -> None:
-    def rows(base: float, other: float) -> list[randomization.Row]:
-        return [
-            {
-                "condition": c,
-                "accuracy": base if c == randomization.BASELINE else other,
-                "sd over repeats": 0.01,
-            }
-            for c in randomization.CONDITIONS
-        ]
+def test_verdict_follows_the_equivalence_margin() -> None:
+    v = randomization.verdict
+    assert v((-0.002, 0.003), (-0.003, 0.004), 0.005) == randomization.EQUIVALENT
+    assert v((-0.04, -0.02), (-0.05, -0.01), 0.005) == randomization.DIFFERENT
+    assert v((-0.02, 0.02), (-0.03, 0.03), 0.005) == randomization.INCONCLUSIVE
 
-    results = [
-        randomization.RunResult("a", 0.05, 0, randomization.CENTER, rows(0.8, 0.7)),
-        randomization.RunResult("b", 0.05, 1, randomization.CENTER, rows(0.8, 0.6)),
-        randomization.RunResult("c", 0.1, 0, randomization.CENTER, rows(0.9, 0.9)),
-    ]
-    table = randomization.aggregate(results)
-    permute = [r for r in table if r["condition"] == randomization.PERMUTE]
-    assert [r["lambda"] for r in permute] == [0.05, 0.1]
-    assert permute[0]["accuracy (mean ± std over seeds)"] == "0.6500 ± 0.0707"
-    assert permute[0]["change vs baseline"] == "-0.1500 ± 0.0707"
-    lams, means, _ = randomization.accuracy_by_lambda(results, randomization.CENTER)[
-        randomization.PERMUTE
-    ]
-    assert lams == [0.05, 0.1] and means == pytest.approx([0.65, 0.9])
+
+def _fake_result(
+    name: str, lam: float, seed: int, drop: float
+) -> randomization.RunResult:
+    rng = numpy.random.default_rng(seed + int(100 * lam))
+    n = 400
+    base = rng.random(n) < 0.8
+    cells: dict[randomization.Key, randomization.Cell] = {}
+    for reader in randomization.READERS:
+        for protocol in randomization.PROTOCOLS:
+            for cond in randomization.CONDITIONS:
+                hit = base.copy()
+                if cond == randomization.PERMUTE and drop > 0:
+                    hit &= rng.random(n) > drop
+                cells[reader, protocol, cond] = randomization.Cell(
+                    hit.astype(numpy.float64), (float(hit.mean()),)
+                )
+    return randomization.RunResult(
+        name, lam, seed, randomization.Evaluation(cells, [], 0.01)
+    )
+
+
+def test_compare_detects_a_real_drop_and_certifies_no_change() -> None:
+    results = [_fake_result(f"a{s}", 0.05, s, 0.2) for s in range(3)]
+    results += [_fake_result(f"b{s}", 0.1, s, 0.0) for s in range(3)]
+    comparisons = randomization.compare(
+        results, 0.005, 200, numpy.random.default_rng(0)
+    )
+    assert len(comparisons) == 2 * 4 * 2 * 3
+    by_key = {(c.lam, c.reader, c.protocol, c.condition): c for c in comparisons}
+    knn = randomization.KNN_EUCLIDEAN
+    drop = by_key[0.05, knn, randomization.RETRAIN, randomization.PERMUTE]
+    assert drop.verdict == randomization.DIFFERENT and drop.difference < -0.1
+    none = by_key[0.1, knn, randomization.RETRAIN, randomization.PERMUTE]
+    assert none.verdict == randomization.EQUIVALENT and none.ci95 == (0.0, 0.0)
+    rows = randomization.comparison_rows(comparisons)
+    assert rows[0]["verdict"] in {
+        randomization.EQUIVALENT,
+        randomization.DIFFERENT,
+        randomization.INCONCLUSIVE,
+    }
+    assert len(randomization.accuracy_rows(results)) == 2 * 4 * 2 * 4
 
 
 def _load_app() -> types.ModuleType:
@@ -231,17 +302,22 @@ def test_analyze_randomize_radius_mode_writes_tables_and_lists_skipped_runs(
         "eval.knn_k=5",
         "--set",
         "eval.num_randomizations=2",
+        "--set",
+        "eval.num_bootstrap=20",
     ]
     app = _load_app()
     assert app.main(argv) == 0
     text = (notes / "idea" / "knn.md").read_text()
-    for name in ("summary", "runs", "model", "skipped"):
+    for name in ("comparison", "accuracy", "runs", "model", "skipped"):
         assert f"BEGIN GENERATED: analyze.randomization_{name}" in text
     lines = text.splitlines()
-    summary = [ln for ln in lines if ln.startswith("| center view | 0.05 |")]
-    assert len(summary) == len(randomization.CONDITIONS)
-    assert "| 2 |" in next(ln for ln in summary if "baseline" in ln)  # two seeds
-    assert not any(ln.startswith("| center view | 0.1 |") for ln in lines)
+    verdicts = [ln for ln in lines if ln.startswith("| 0.05 |") and "±" not in ln]
+    assert len(verdicts) == 4 * 2 * 3  # readers x protocols x conditions
+    assert all(
+        ln.rstrip().endswith(("equivalent |", "different |", "inconclusive |"))
+        for ln in verdicts
+    )
+    assert not any(ln.startswith("| 0.1 |") for ln in lines)
     assert "| toy_lam0.1_s0 | stl10_train |" in text
     assert app.main(argv) == 0
     assert (notes / "idea" / "knn.md").read_text() == text  # idempotent
