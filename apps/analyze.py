@@ -25,6 +25,14 @@ result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
 section; no other analysis runs and no figures are made.
 
+With `--randomize-radius PREFIX`, the radius of z-space embeddings is randomized
+before k-NN, linear-probe and MLP classification of the STL-10 labels (bank:
+`stl10_train` dump, test set: `stl10_test` dump; z only; see
+`lejepa_norm.eval.randomization`) for every run `PREFIX_*` that has both dumps;
+runs missing a dump are listed in the note, not dropped silently. The note gets
+paired-bootstrap differences against the unmodified baseline with an equivalence
+verdict (margin `eval.equivalence_margin`), accuracy tables and figures.
+
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
 `LEJEPA_NORM_RUNS_DIR/<run-name>/`), then writes markdown tables into generated
@@ -44,6 +52,9 @@ Examples:
         a_l0.05_s1_controls.md --note radius-conditional/controls_summary.md
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
+    python apps/analyze.py --config configs/base.yaml \
+        --randomize-radius radius_marginal \
+        --note radius_randomization/radius_randomization.md
 """
 
 import argparse
@@ -53,6 +64,8 @@ import pathlib
 import sys
 import typing
 
+import numpy
+
 from lejepa_norm import config
 from lejepa_norm import paths
 from lejepa_norm import plotting
@@ -60,6 +73,7 @@ from lejepa_norm import reporting
 from lejepa_norm.eval import analysis
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
+from lejepa_norm.eval import randomization
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sweep
 from lejepa_norm.eval import transfer
@@ -81,11 +95,20 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Writes all analyses of one run into an experiment note."
     )
-    parser.add_argument("--config", type=pathlib.Path, help="Per-run mode only.")
+    parser.add_argument(
+        "--config",
+        type=pathlib.Path,
+        help="Per-run and --randomize-radius modes.",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--run-name", help="Analyze one run (needs --config).")
     mode.add_argument(
         "--sweep", metavar="PREFIX", help="Summarize all runs named PREFIX_*."
+    )
+    mode.add_argument(
+        "--randomize-radius",
+        metavar="PREFIX",
+        help="k-NN with randomized radius for runs PREFIX_* (needs --config).",
     )
     mode.add_argument(
         "--aggregate-controls",
@@ -128,6 +151,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--transfer requires --run-name")
     if args.run_name is not None and args.config is None:
         parser.error("--run-name requires --config")
+    if args.randomize_radius is not None and args.config is None:
+        parser.error("--randomize-radius requires --config")
     if args.redundancy_controls and args.run_name is None:
         parser.error("--redundancy-controls requires --run-name")
     return args
@@ -400,6 +425,148 @@ def _run_transfer(args: argparse.Namespace) -> int:
     return 0
 
 
+def _randomization_figures(
+    comparisons: list[randomization.Comparison],
+    note: pathlib.Path,
+    chrome: pathlib.Path | None,
+) -> list[str]:
+    """One figure per reader: paired accuracy change vs lambda, with 95% CIs."""
+    prefix = note.parent / note.stem
+    links: list[str] = []
+    for reader in randomization.READERS:
+        series: dict[str, plotting.Series] = {}
+        for protocol in randomization.PROTOCOLS:
+            for condition in randomization.CONDITIONS[1:]:
+                rows = [
+                    c
+                    for c in comparisons
+                    if c.reader == reader
+                    and c.protocol == protocol
+                    and c.condition == condition
+                ]
+                series[f"{condition} ({protocol})"] = plotting.Series(
+                    x=[c.lam for c in rows],
+                    y=[100 * c.difference for c in rows],
+                    low=[100 * c.ci95[0] for c in rows],
+                    high=[100 * c.ci95[1] for c in rows],
+                )
+        fig = plotting.line_plot(
+            series,
+            f"Accuracy change vs baseline, {reader} (z, 95% paired bootstrap CI)",
+            "lambda",
+            "accuracy change (points)",
+            reference=0.0,
+        )
+        slug = "".join(ch if ch.isalnum() else "_" for ch in reader.split(" (")[0])
+        out = plotting.export_png(fig, f"{prefix}_change_{slug}.png", chrome)
+        links.append(reporting.image_link(out, note, f"accuracy change, {reader}"))
+    return links
+
+
+def _run_randomize_radius(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    runs = sweep.load_runs(locations.runs_dir, args.randomize_radius)
+    results: list[randomization.RunResult] = []
+    diagnostics: list[dict[str, str | int | float]] = []
+    skipped: list[dict[str, str | int | float]] = []
+    for run in runs:
+        bank = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, run.name, dumps.STL10_TRAIN)
+        )
+        query = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, run.name, dumps.STL10_TEST)
+        )
+        if bank is None or query is None:
+            missing = [
+                name
+                for name, shard in (
+                    (dumps.STL10_TRAIN, bank),
+                    (dumps.STL10_TEST, query),
+                )
+                if shard is None
+            ]
+            skipped.append({"run": run.name, "missing dump": ", ".join(missing)})
+            print(f"skipping {run.name}: no {', '.join(missing)} dump", file=sys.stderr)
+            continue
+        evaluation = randomization.evaluate_shards(bank, query, cfg.eval, cfg.seed)
+        results.append(randomization.RunResult(run.name, run.lam, run.seed, evaluation))
+        diagnostics += [
+            {
+                "run": run.name,
+                "MLP weight decay": evaluation.weight_decay,
+                **row,
+            }
+            for row in evaluation.model
+        ]
+        print(f"done {run.name}", file=sys.stderr)
+    if not results:
+        print(f"no run named {args.randomize_radius}_* has both dumps", file=sys.stderr)
+        return 1
+    margin = cfg.eval.equivalence_margin
+    comparisons = randomization.compare(
+        results,
+        margin,
+        cfg.eval.num_bootstrap,
+        numpy.random.default_rng(cfg.seed),
+    )
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.randomization_comparison",
+        "### Paired accuracy change vs the baseline, per lambda\n\n"
+        f"z-space, center views; bank = STL-10 train, test set = STL-10 test; the "
+        "same transformation is applied to bank and test set independently. "
+        "Differences are in accuracy points (condition minus baseline on the same "
+        "test images), averaged over training seeds; intervals are paired "
+        f"bootstrap percentile intervals ({cfg.eval.num_bootstrap} replicates, test "
+        "images resampled within each seed). Verdict, with the equivalence margin "
+        f"set to ±{100 * margin:g} points before looking at results: `equivalent` "
+        "if the 90% interval (TOST at 5%) lies inside the margin, `different` if "
+        "not equivalent and the 95% interval excludes 0, otherwise `inconclusive`. "
+        f"Shuffle repeats ({cfg.eval.num_randomizations} per randomized condition) "
+        "only average out shuffle noise; they are not part of the interval.\n\n"
+        + reporting.markdown_table(randomization.comparison_rows(comparisons)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.randomization_accuracy",
+        "### Accuracy: mean ± std over training seeds, per lambda\n\n"
+        + reporting.markdown_table(randomization.accuracy_rows(results)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.randomization_runs",
+        "### Per-run accuracies\n\n"
+        + reporting.markdown_table(randomization.per_run_rows(results)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.randomization_model",
+        "### Direction -> log-radius regression used by the residual shuffle\n\n"
+        + reporting.markdown_table(diagnostics),
+    )
+    reporting.update_section(
+        note,
+        "analyze.randomization_skipped",
+        "### Runs without the required dumps\n\n"
+        + (
+            reporting.markdown_table(skipped)
+            if skipped
+            else "None: every run of the prefix has `stl10_train` and `stl10_test`."
+        ),
+    )
+    if not args.no_figures:
+        links = _randomization_figures(comparisons, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note,
+            "analyze.randomization_figures",
+            "### Figures\n\n" + "\n\n".join(links),
+        )
+    print(f"wrote {note}")
+    return 0
+
+
 def _run_aggregate_transfer(args: argparse.Namespace) -> int:
     locations = paths.load_paths()
     by_lambda: dict[float, list[list[dict[str, str]]]] = {}
@@ -465,6 +632,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
     args = _parse(argv)
     if args.sweep is not None:
         return _run_sweep(args)
+    if args.randomize_radius is not None:
+        return _run_randomize_radius(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
     if args.aggregate_transfer is not None:
