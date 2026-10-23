@@ -27,9 +27,15 @@ overstated by about 6% (0.469 against 0.442). See `projection_kurtosis`.
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
 
+import collections.abc
 import dataclasses
+import json
+import logging
 import math
+import os
+import pathlib
 import typing
+import zlib
 
 import numpy
 import numpy.typing
@@ -48,6 +54,9 @@ Family = typing.Literal["scaled_chi", "lognormal"]
 FAMILIES: tuple[Family, ...] = ("scaled_chi", "lognormal")
 KAPPAS = (1.0, 5.0, 15.0, 20.0, 26.0)
 LEVEL = 0.05
+LOG_EVERY = 25
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,23 +189,24 @@ def sigreg_values(
         num_views: Independent views per call (the loss averages over views).
         cfg: Study sizes.
         rng: Sample generator.
-        generator: Slice-direction generator of the SIGReg instance.
+        generator: Slice-direction generator of the SIGReg instance; its device
+            is where SIGReg runs.
         reps: Overrides `cfg.reps`.
 
     Returns:
         Float64 `(reps,)`.
     """
     sig = _sigreg(cfg, generator)
-    out = [
-        float(
-            sig(
-                sample_embeddings(
-                    family, kappa, cfg.dim, (num_views, cfg.batch_size), rng
-                )
+    total = cfg.reps if reps is None else reps
+    out: list[float] = []
+    with torch.no_grad():
+        for rep in range(total):
+            z = sample_embeddings(
+                family, kappa, cfg.dim, (num_views, cfg.batch_size), rng
             )
-        )
-        for _ in range(cfg.reps if reps is None else reps)
-    ]
+            out.append(float(sig(z.to(generator.device))))
+            if (rep + 1) % LOG_EVERY == 0:
+                logger.info("SIGReg, %d view(s): %d/%d reps", num_views, rep + 1, total)
     return numpy.asarray(out, dtype=numpy.float64)
 
 
@@ -271,13 +281,13 @@ def gradient_stats(
     rows: list[dict[str, float]] = []
     for _ in range(cfg.grad_reps):
         z = sample_embeddings(family, kappa, cfg.dim, (cfg.batch_size,), rng)
-        z.requires_grad_(True)
+        z = z.to(generator.device).requires_grad_(True)
         sig(z).backward()  # pyright: ignore[reportUnknownMemberType]
         assert z.grad is not None
         rows.append(
             split_gradient(
-                z.detach().numpy().astype(numpy.float64),
-                z.grad.numpy().astype(numpy.float64),
+                z.detach().cpu().numpy().astype(numpy.float64),
+                z.grad.cpu().numpy().astype(numpy.float64),
             )
         )
     return {k: float(numpy.mean([row[k] for row in rows])) for k in rows[0]}
@@ -339,77 +349,257 @@ class SyntheticStudy:
     num_views: int
 
 
-def run_synthetic(cfg: StudyConfig) -> SyntheticStudy:
-    """Runs (a) SIGReg power, (b) gradient split and (c) the chi_d KS contrast."""
-    rng = numpy.random.default_rng(cfg.seed)
-    generator = torch.Generator().manual_seed(cfg.seed)
-    null = {
-        v: sigreg_values(None, 1.0, v, cfg, rng, generator) for v in (1, cfg.num_views)
-    }
-    null_ks = ks_values(None, 1.0, cfg, rng)
-    power_rows: list[dict[str, str | float]] = []
-    gradient_rows: list[dict[str, str | float]] = []
-    null_grad = gradient_stats(None, 1.0, cfg, rng, generator)
-    gradient_rows.append({"family": "N(0, I)", "kappa": 1.0, **null_grad})
+@dataclasses.dataclass(frozen=True)
+class CellResult:
+    """Raw output of one synthetic cell (one independent unit of work).
+
+    Attributes:
+        name: Unit name (see `cell_units`).
+        family: Radial profile, or None for exact `N(0, I)`.
+        kappa: Radial spread.
+        sigreg: Single-view SIGReg values over repetitions, key 1, and the
+            `num_views`-view average, key `cfg.num_views`.
+        ks: KS distances to `chi_d` over repetitions.
+        gradient: Output of `gradient_stats`.
+    """
+
+    name: str
+    family: Family | None
+    kappa: float
+    sigreg: dict[int, FloatArray]
+    ks: FloatArray
+    gradient: dict[str, float]
+
+
+NULL_UNIT = "null"
+
+
+def cell_units() -> dict[str, tuple[Family | None, float]]:
+    """All synthetic units by name: the `N(0, I)` null and family x kappa cells."""
+    units: dict[str, tuple[Family | None, float]] = {NULL_UNIT: (None, 1.0)}
     for family in FAMILIES:
         for kappa in KAPPAS:
-            values = {
-                v: sigreg_values(family, kappa, v, cfg, rng, generator)
-                for v in (1, cfg.num_views)
-            }
-            ks = ks_values(family, kappa, cfg, rng)
-            for views, vals in values.items():
-                power_rows.append(
-                    {
-                        "family": family,
-                        "kappa": kappa,
-                        "statistic": f"SIGReg, {views} view(s)",
-                        "mean": float(vals.mean()),
-                        "std": float(vals.std(ddof=1)),
-                        "shift / null std": float(
-                            (vals.mean() - null[views].mean()) / null[views].std(ddof=1)
-                        ),
-                        "power": power(null[views], vals),
-                    }
-                )
+            units[f"{family}_k{kappa:g}"] = (family, kappa)
+    return units
+
+
+def real_unit(run_name: str) -> str:
+    """Unit name of the real-embedding analysis of one run."""
+    return f"real_{run_name}"
+
+
+def unit_seed(cfg: StudyConfig, name: str) -> int:
+    """Seed of one unit: fixed by the study seed and the unit name only.
+
+    Units therefore give the same result whatever the order or the process they
+    run in, which is what makes a fan-out over SLURM jobs reproducible.
+    """
+    return (cfg.seed * 1_000_003 + zlib.crc32(name.encode())) % 2**32
+
+
+def _generators(
+    cfg: StudyConfig, name: str, device: torch.device
+) -> tuple[numpy.random.Generator, torch.Generator]:
+    seed = unit_seed(cfg, name)
+    return numpy.random.default_rng(seed), torch.Generator(device).manual_seed(seed)
+
+
+def run_cell(name: str, cfg: StudyConfig, device: torch.device) -> CellResult:
+    """Runs one synthetic unit: SIGReg values, KS distances and the gradient split.
+
+    Args:
+        name: A key of `cell_units`.
+        cfg: Study sizes.
+        device: Where SIGReg runs (sampling stays on the CPU).
+
+    Returns:
+        The raw results of the cell.
+    """
+    family, kappa = cell_units()[name]
+    rng, generator = _generators(cfg, name, device)
+    sigreg_by_views: dict[int, FloatArray] = {}
+    for views in (1, cfg.num_views):
+        sigreg_by_views[views] = sigreg_values(
+            family, kappa, views, cfg, rng, generator
+        )
+        logger.info("%s: SIGReg with %d view(s) done", name, views)
+    ks = ks_values(family, kappa, cfg, rng)
+    gradient = gradient_stats(family, kappa, cfg, rng, generator)
+    logger.info("%s: done", name)
+    return CellResult(name, family, kappa, sigreg_by_views, ks, gradient)
+
+
+def _atomic_write(
+    path: pathlib.Path, write: collections.abc.Callable[[str], None]
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    write(str(tmp))
+    os.replace(tmp, path)
+
+
+def shard_path(shard_dir: pathlib.Path, name: str) -> pathlib.Path:
+    """Where a unit's result lives (`.npz` for cells, `.json` for real runs)."""
+    suffix = ".json" if name.startswith("real_") else ".npz"
+    return shard_dir / f"{name}{suffix}"
+
+
+def _cfg_json(cfg: StudyConfig) -> str:
+    return json.dumps(dataclasses.asdict(cfg), sort_keys=True)
+
+
+def save_cell(shard_dir: pathlib.Path, cell: CellResult, cfg: StudyConfig) -> None:
+    """Writes a cell atomically together with the study config that produced it."""
+    arrays: dict[str, typing.Any] = {
+        f"sigreg_{views}": values for views, values in cell.sigreg.items()
+    }
+    arrays["ks"] = cell.ks
+    arrays["gradient_json"] = numpy.array(json.dumps(cell.gradient))
+    arrays["cfg_json"] = numpy.array(_cfg_json(cfg))
+
+    def write(tmp: str) -> None:
+        with open(tmp, "wb") as handle:
+            numpy.savez(handle, **arrays)
+
+    _atomic_write(shard_path(shard_dir, cell.name), write)
+
+
+def load_cell(
+    shard_dir: pathlib.Path, name: str, cfg: StudyConfig
+) -> CellResult | None:
+    """Loads a cell; None if it is missing or was made with a different config."""
+    path = shard_path(shard_dir, name)
+    if not path.exists():
+        return None
+    with numpy.load(path) as data:
+        if str(data["cfg_json"]) != _cfg_json(cfg):
+            return None
+        family, kappa = cell_units()[name]
+        sigreg_by_views = {
+            int(key.removeprefix("sigreg_")): numpy.asarray(data[key])
+            for key in data.files
+            if key.startswith("sigreg_")
+        }
+        return CellResult(
+            name,
+            family,
+            kappa,
+            sigreg_by_views,
+            numpy.asarray(data["ks"]),
+            json.loads(str(data["gradient_json"])),
+        )
+
+
+def save_real(
+    shard_dir: pathlib.Path,
+    name: str,
+    row: dict[str, str | float],
+    cfg: StudyConfig,
+    real_reps: int,
+) -> None:
+    """Writes the raw row of a real-embedding unit atomically."""
+    payload = {"cfg": _cfg_json(cfg), "real_reps": real_reps, "row": row}
+
+    def write(tmp: str) -> None:
+        pathlib.Path(tmp).write_text(json.dumps(payload))
+
+    _atomic_write(shard_path(shard_dir, name), write)
+
+
+def load_real(
+    shard_dir: pathlib.Path, name: str, cfg: StudyConfig, real_reps: int
+) -> dict[str, str | float] | None:
+    """Loads a real unit's raw row; None if missing or made with other settings."""
+    path = shard_path(shard_dir, name)
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text())
+    if payload["cfg"] != _cfg_json(cfg) or payload["real_reps"] != real_reps:
+        return None
+    return payload["row"]
+
+
+def assemble(
+    cells: collections.abc.Mapping[str, CellResult], cfg: StudyConfig
+) -> SyntheticStudy:
+    """Combines all synthetic cells into tables (power is against the null cell).
+
+    Args:
+        cells: Results of every key of `cell_units`.
+        cfg: Study sizes.
+
+    Returns:
+        The tables and the null summary.
+    """
+    null = cells[NULL_UNIT]
+    views_list = (1, cfg.num_views)
+    power_rows: list[dict[str, str | float]] = []
+    gradient_rows: list[dict[str, str | float]] = [
+        {"family": "N(0, I)", "kappa": 1.0, **null.gradient}
+    ]
+    for name, (family, kappa) in cell_units().items():
+        if family is None:
+            continue
+        cell = cells[name]
+        for views in views_list:
+            vals, base = cell.sigreg[views], null.sigreg[views]
             power_rows.append(
                 {
                     "family": family,
                     "kappa": kappa,
-                    "statistic": "KS vs chi_d",
-                    "mean": float(ks.mean()),
-                    "std": float(ks.std(ddof=1)),
+                    "statistic": f"SIGReg, {views} view(s)",
+                    "mean": float(vals.mean()),
+                    "std": float(vals.std(ddof=1)),
                     "shift / null std": float(
-                        (ks.mean() - null_ks.mean()) / null_ks.std(ddof=1)
+                        (vals.mean() - base.mean()) / base.std(ddof=1)
                     ),
-                    "power": power(null_ks, ks),
+                    "power": power(base, vals),
                 }
             )
-            gradient_rows.append(
-                {
-                    "family": family,
-                    "kappa": kappa,
-                    **gradient_stats(family, kappa, cfg, rng, generator),
-                }
-            )
+        power_rows.append(
+            {
+                "family": family,
+                "kappa": kappa,
+                "statistic": "KS vs chi_d",
+                "mean": float(cell.ks.mean()),
+                "std": float(cell.ks.std(ddof=1)),
+                "shift / null std": float(
+                    (cell.ks.mean() - null.ks.mean()) / null.ks.std(ddof=1)
+                ),
+                "power": power(null.ks, cell.ks),
+            }
+        )
+        gradient_rows.append({"family": family, "kappa": kappa, **cell.gradient})
     return SyntheticStudy(
         power_rows,
         gradient_rows,
-        float(null[1].mean()),
-        float(null[1].std(ddof=1)),
-        (float(null[cfg.num_views].mean()), float(null[cfg.num_views].std(ddof=1))),
+        float(null.sigreg[1].mean()),
+        float(null.sigreg[1].std(ddof=1)),
+        (
+            float(null.sigreg[cfg.num_views].mean()),
+            float(null.sigreg[cfg.num_views].std(ddof=1)),
+        ),
         cfg.num_views,
     )
+
+
+def run_synthetic(
+    cfg: StudyConfig, device: torch.device | None = None
+) -> SyntheticStudy:
+    """Runs every synthetic unit in this process (small studies and tests).
+
+    The SLURM fan-out runs the same units, one per job (`run_cell`).
+    """
+    dev = torch.device("cpu") if device is None else device
+    return assemble({name: run_cell(name, cfg, dev) for name in cell_units()}, cfg)
 
 
 def real_row(
     name: str,
     shard: shards.EmbeddingShard,
     cfg: StudyConfig,
-    study: SyntheticStudy,
     training_dist: float | None,
-    rng: numpy.random.Generator,
-    generator: torch.Generator,
+    device: torch.device,
     real_reps: int = 20,
 ) -> dict[str, str | float]:
     """SIGReg value, kappa and KS distance of one run's real `z` (z only).
@@ -419,21 +609,21 @@ def real_row(
     augmented views; the synthetic scaled-chi value at the run's own center-view
     kappa shows how much of it radial spread alone would explain. The gradient of
     the center-view SIGReg with respect to `z` is split into radial and tangential
-    parts (`split_gradient`) on the same batches.
+    parts (`split_gradient`) on the same batches. The standardization against the
+    null is added later by `standardize_real_row`.
 
     Args:
         name: Run name.
         shard: STL-10 test embeddings (`z` is `(N, K + 1, d)`, view 0 = center).
         cfg: Study sizes.
-        study: Synthetic results (for the null mean and standard deviation).
         training_dist: Last epoch mean of the logged training SIGReg, if known.
-        rng: Random generator (batch selection and synthetic draws).
-        generator: Slice-direction generator.
+        device: Where SIGReg runs.
         real_reps: Random batches.
 
     Returns:
-        One table row.
+        One table row (without the null-standardized column).
     """
+    rng, generator = _generators(cfg, real_unit(name), device)
     z = shard.z.astype(numpy.float64)
     n, num_views, dim = z.shape
     center = z[:, 0]
@@ -443,9 +633,9 @@ def real_row(
     ks_vals: list[float] = []
     batch_kappas: list[float] = []
     grads: list[dict[str, float]] = []
-    for _ in range(real_reps):
+    for rep in range(real_reps):
         idx = rng.choice(n, size=min(cfg.batch_size, n), replace=False)
-        batch = torch.from_numpy(z[idx].astype(numpy.float32))
+        batch = torch.from_numpy(z[idx].astype(numpy.float32)).to(device)
         center_z = batch[:, 0].clone().requires_grad_(True)
         value = sig(center_z)
         value.backward()  # pyright: ignore[reportUnknownMemberType]
@@ -453,15 +643,19 @@ def real_row(
         center_vals.append(float(value.detach()))
         grads.append(
             split_gradient(
-                center_z.detach().numpy().astype(numpy.float64),
-                center_z.grad.numpy().astype(numpy.float64),
+                center_z.detach().cpu().numpy().astype(numpy.float64),
+                center_z.grad.cpu().numpy().astype(numpy.float64),
             )
         )
-        aug_vals.append(
-            float(numpy.mean([float(sig(batch[:, k])) for k in range(1, num_views)]))
-        )
+        with torch.no_grad():
+            aug_vals.append(
+                float(
+                    numpy.mean([float(sig(batch[:, k])) for k in range(1, num_views)])
+                )
+            )
         ks_vals.append(ks_statistic(numpy.linalg.norm(center[idx], axis=-1), dim))
         batch_kappas.append(metrics.kappa(center[idx]))
+        logger.info("%s: real batch %d/%d", name, rep + 1, real_reps)
     kappa_center = metrics.kappa(center)
     synthetic = sigreg_values(
         "scaled_chi",
@@ -482,8 +676,6 @@ def real_row(
         "std(||z||) / mean(||z||)": float(r.std() / r.mean()),
         "SIGReg, center view": center_sigreg,
         "SIGReg, augmented views": float(numpy.mean(aug_vals)),
-        "(center - null mean) / null std": (center_sigreg - study.null_mean)
-        / study.null_std,
         "synthetic scaled-chi at same kappa": float(synthetic.mean()),
         "KS vs chi_d (batch of N)": float(numpy.mean(ks_vals)),
         "grad radial rms": float(numpy.mean([g["radial_rms"] for g in grads])),
@@ -493,6 +685,20 @@ def real_row(
         ),
         "training SIGReg (last epoch)": "" if training_dist is None else training_dist,
     }
+
+
+def standardize_real_row(
+    row: dict[str, str | float], study: SyntheticStudy
+) -> dict[str, str | float]:
+    """Adds `(center - null mean) / null std` to a raw real row (after `kappa`)."""
+    out: dict[str, str | float] = {}
+    for key, value in row.items():
+        out[key] = value
+        if key == "SIGReg, augmented views":
+            out["(center - null mean) / null std"] = (
+                float(row["SIGReg, center view"]) - study.null_mean
+            ) / study.null_std
+    return out
 
 
 def load_real_shard(embed_dir: str, run_name: str) -> shards.EmbeddingShard | None:

@@ -1,5 +1,6 @@
 """Synthetic SIGReg power study: moment relations, null recovery, workflow."""
 
+import dataclasses
 import importlib.util
 import pathlib
 import types
@@ -115,8 +116,32 @@ def _load_app() -> types.ModuleType:
     return module
 
 
+def test_units_are_reproducible_and_shards_guard_against_stale_config(
+    tmp_path: pathlib.Path,
+) -> None:
+    cfg = sp.StudyConfig(
+        dim=16, batch_size=32, num_slices=16, num_views=2, reps=6, grad_reps=2
+    )
+    cpu = torch.device("cpu")
+    first = sp.run_cell("scaled_chi_k5", cfg, cpu)
+    again = sp.run_cell("scaled_chi_k5", cfg, cpu)
+    other = sp.run_cell("lognormal_k5", cfg, cpu)
+    numpy.testing.assert_array_equal(first.sigreg[1], again.sigreg[1])
+    assert not numpy.array_equal(first.sigreg[1], other.sigreg[1])
+    assert sp.load_cell(tmp_path, first.name, cfg) is None
+    sp.save_cell(tmp_path, first, cfg)
+    loaded = sp.load_cell(tmp_path, first.name, cfg)
+    assert loaded is not None
+    numpy.testing.assert_array_equal(loaded.sigreg[2], first.sigreg[2])
+    assert loaded.gradient == first.gradient
+    stale = dataclasses.replace(cfg, reps=7)
+    assert sp.load_cell(tmp_path, first.name, stale) is None
+
+
 def test_app_writes_synthetic_and_real_sections(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     rng = numpy.random.default_rng(0)
     n, k, d = 300, 3, 32
@@ -142,15 +167,12 @@ def test_app_writes_synthetic_and_real_sections(
         monkeypatch.setenv(var, str(tmp_path / sub))
     monkeypatch.setenv(paths.KALEIDO_CHROME_VAR, "")
     monkeypatch.chdir(tmp_path)
-    argv = [
+    common = [
         "--sigreg-power",
         "--config",
         str(REPO / "configs" / "base.yaml"),
         "--runs-prefix",
         "toy",
-        "--note",
-        "idea/power.md",
-        "--no-figures",
         "--set",
         "model.embed_dim=32",
         "--set",
@@ -165,7 +187,20 @@ def test_app_writes_synthetic_and_real_sections(
         "eval.power_real_reps=3",
     ]
     app = _load_app()
-    assert app.main(argv) == 0
+    assert app.main([*common, "--power-list-units"]) == 0
+    units = capsys.readouterr().out.split()
+    assert units == [*sp.cell_units(), "real_toy_s0"]
+    aggregate = [*common, "--note", "idea/power.md", "--no-figures"]
+    with pytest.raises(FileNotFoundError, match="null"):
+        app.main(aggregate)
+    for unit in units:  # what the SLURM array does, one task per unit
+        assert app.main([*common, "--power-unit", unit]) == 0
+    shard_dir = tmp_path / "runs" / "sigreg_power" / "default"
+    mtimes = {p.name: p.stat().st_mtime_ns for p in shard_dir.iterdir()}
+    assert len(mtimes) == len(units)
+    assert app.main([*common, "--power-unit", "null"]) == 0  # resume: skipped
+    assert {p.name: p.stat().st_mtime_ns for p in shard_dir.iterdir()} == mtimes
+    assert app.main(aggregate) == 0
     text = (tmp_path / "notes" / "idea" / "power.md").read_text()
     for name in ("setup", "kurtosis", "power", "gradient", "real"):
         assert f"BEGIN GENERATED: sigreg_power.{name}" in text

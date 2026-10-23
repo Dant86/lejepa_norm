@@ -15,10 +15,13 @@ per-run notes are read back and aggregated over seeds per lambda (mean ± std);
 nothing is recomputed.
 
 With `--sigreg-power` (needs `--config`), the synthetic SIGReg power study of
-`lejepa_norm.eval.sigreg_power` is run (sizes from the config) and written with
-power and gradient tables and a figure; with `--runs-prefix PREFIX` the same
-quantities are added for the `stl10_test` dumps of every run `PREFIX_*`
-(projector output z only).
+`lejepa_norm.eval.sigreg_power` (sizes from the config) is split into independent
+units (one per radial profile and kappa, plus one per real run `PREFIX_*` given by
+`--runs-prefix`; projector output z only). `--power-list-units` prints them,
+`--power-unit NAME` computes one into a shard under `<runs_dir>/sigreg_power` (on
+the GPU if there is one; finished shards are skipped, so jobs can be requeued), and
+without either the shards are aggregated into the note with power and gradient
+tables and figures (`slurm/sigreg_power.sbatch` fans the units out over SLURM).
 
 With `--redundancy-controls` (per-run mode), only the controls of the redundancy
 result are run (permutation null, cross-view regressions, F-test; see
@@ -41,12 +44,15 @@ Examples:
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
     python apps/analyze.py --sigreg-power --config configs/base.yaml \
+        --runs-prefix radius_marginal --power-unit null
+    python apps/analyze.py --sigreg-power --config configs/base.yaml \
         --runs-prefix radius_marginal --note sigreg_power/power.md
 """
 
 import argparse
 import collections.abc
 import dataclasses
+import logging
 import math
 import pathlib
 import sys
@@ -65,6 +71,8 @@ from lejepa_norm.eval import dumps
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
 from lejepa_norm.eval import sweep
+
+logger = logging.getLogger(__name__)
 
 _TITLES = {
     analysis.MARGINAL: "Marginal radius (STL-10 test)",
@@ -103,12 +111,26 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Synthetic SIGReg power study (needs --config).",
     )
     parser.add_argument(
+        "--power-unit",
+        help="With --sigreg-power: compute only this unit into its shard (see "
+        "--power-list-units); without it, aggregate the shards into --note.",
+    )
+    parser.add_argument(
+        "--power-list-units",
+        action="store_true",
+        help="With --sigreg-power: print the unit names, one per line, and exit.",
+    )
+    parser.add_argument(
+        "--power-shards",
+        default="default",
+        help="With --sigreg-power: shard directory name under <runs_dir>/sigreg_power.",
+    )
+    parser.add_argument(
         "--runs-prefix",
         help="With --sigreg-power: also analyze the real z of runs PREFIX_*.",
     )
     parser.add_argument(
         "--note",
-        required=True,
         type=pathlib.Path,
         help="Experiment note, relative to LEJEPA_NORM_NOTES_DIR.",
     )
@@ -126,6 +148,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--run-name requires --config")
     if args.sigreg_power and args.config is None:
         parser.error("--sigreg-power requires --config")
+    if args.note is None and not (args.power_unit or args.power_list_units):
+        parser.error("--note is required")
     if args.redundancy_controls and args.run_name is None:
         parser.error("--redundancy-controls requires --run-name")
     return args
@@ -431,13 +455,89 @@ def _power_figures(
     return links
 
 
-def _run_sigreg_power(args: argparse.Namespace) -> int:
-    cfg = config.load_config(args.config, args.overrides)
-    locations = paths.load_paths()
+def _real_runs(args: argparse.Namespace, locations: paths.Paths) -> list[str]:
+    """Runs `PREFIX_*` that have an `stl10_test` dump."""
+    if args.runs_prefix is None:
+        return []
+    return sorted(
+        p.name
+        for p in locations.embed_dir.glob(f"{args.runs_prefix}_*")
+        if dumps.set_dir(locations.embed_dir, p.name, dumps.STL10_TEST).is_dir()
+    )
+
+
+def _run_power_unit(
+    unit: str,
+    study_cfg: sigreg_power.StudyConfig,
+    real_reps: int,
+    shard_dir: pathlib.Path,
+    locations: paths.Paths,
+    device: torch.device,
+) -> None:
+    """Computes one unit of the power study into its shard (skips finished ones)."""
+    if unit.startswith("real_"):
+        name = unit.removeprefix("real_")
+        if sigreg_power.load_real(shard_dir, unit, study_cfg, real_reps) is not None:
+            logger.info("%s: shard exists, skipping", unit)
+            return
+        shard = sigreg_power.load_real_shard(str(locations.embed_dir), name)
+        if shard is None:
+            raise FileNotFoundError(f"no stl10_test dump for run {name}")
+        metrics_file = locations.runs_dir / name / runlog.METRICS_FILE
+        records = runlog.read_metrics(metrics_file) if metrics_file.exists() else []
+        row = sigreg_power.real_row(
+            name,
+            shard,
+            study_cfg,
+            sigreg_power.last_training_dist(records),
+            device,
+            real_reps,
+        )
+        sigreg_power.save_real(shard_dir, unit, row, study_cfg, real_reps)
+        return
+    if unit not in sigreg_power.cell_units():
+        raise ValueError(f"unknown synthetic unit {unit!r}")
+    if sigreg_power.load_cell(shard_dir, unit, study_cfg) is not None:
+        logger.info("%s: shard exists, skipping", unit)
+        return
+    sigreg_power.save_cell(
+        shard_dir, sigreg_power.run_cell(unit, study_cfg, device), study_cfg
+    )
+
+
+def _write_power_note(
+    args: argparse.Namespace,
+    study_cfg: sigreg_power.StudyConfig,
+    real_reps: int,
+    shard_dir: pathlib.Path,
+    locations: paths.Paths,
+    real_names: list[str],
+) -> None:
+    """Aggregates the unit shards into the note (cheap, CPU only)."""
+    cells: dict[str, sigreg_power.CellResult] = {}
+    missing: list[str] = []
+    for unit in sigreg_power.cell_units():
+        cell = sigreg_power.load_cell(shard_dir, unit, study_cfg)
+        if cell is None:
+            missing.append(unit)
+        else:
+            cells[unit] = cell
+    raw_real: list[dict[str, str | float]] = []
+    for name in real_names:
+        unit = sigreg_power.real_unit(name)
+        row = sigreg_power.load_real(shard_dir, unit, study_cfg, real_reps)
+        if row is None:
+            missing.append(unit)
+        else:
+            raw_real.append(row)
+    if missing:
+        raise FileNotFoundError(
+            f"missing or stale shards in {shard_dir}: {', '.join(missing)}"
+        )
     note = locations.notes_dir / args.note
-    study_cfg = sigreg_power.study_config(cfg)
     rng = numpy.random.default_rng(study_cfg.seed + 1)
-    study = sigreg_power.run_synthetic(study_cfg)
+    study = sigreg_power.assemble(cells, study_cfg)
+    real = [sigreg_power.standardize_real_row(row, study) for row in raw_real]
     reporting.update_section(
         note,
         "sigreg_power.setup",
@@ -471,32 +571,7 @@ def _run_sigreg_power(args: argparse.Namespace) -> int:
         "### Gradient of single-view SIGReg: radial vs tangential part\n\n"
         + reporting.markdown_table(study.gradient_rows),
     )
-    real: list[dict[str, str | float]] = []
     if args.runs_prefix is not None:
-        generator = torch.Generator().manual_seed(study_cfg.seed + 2)
-        names = sorted(
-            p.name
-            for p in locations.embed_dir.glob(f"{args.runs_prefix}_*")
-            if p.is_dir()
-        )
-        for name in names:
-            shard = sigreg_power.load_real_shard(str(locations.embed_dir), name)
-            if shard is None:
-                continue
-            metrics_file = locations.runs_dir / name / runlog.METRICS_FILE
-            records = runlog.read_metrics(metrics_file) if metrics_file.exists() else []
-            real.append(
-                sigreg_power.real_row(
-                    name,
-                    shard,
-                    study_cfg,
-                    study,
-                    sigreg_power.last_training_dist(records),
-                    rng,
-                    generator,
-                    cfg.eval.power_real_reps,
-                )
-            )
         reporting.update_section(
             note,
             "sigreg_power.real",
@@ -509,6 +584,33 @@ def _run_sigreg_power(args: argparse.Namespace) -> int:
             note, "sigreg_power.figures", "### Figures\n\n" + "\n\n".join(links)
         )
     print(f"wrote {note}")
+
+
+def _run_sigreg_power(args: argparse.Namespace) -> int:
+    """Power study: list units, run one unit (GPU if available) or aggregate."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stderr
+    )
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    study_cfg = sigreg_power.study_config(cfg)
+    real_reps = cfg.eval.power_real_reps
+    shard_dir = locations.runs_dir / "sigreg_power" / args.power_shards
+    real_names = _real_runs(args, locations)
+    units = list(sigreg_power.cell_units()) + [
+        sigreg_power.real_unit(name) for name in real_names
+    ]
+    if args.power_list_units:
+        print("\n".join(units), flush=True)
+        return 0
+    if args.power_unit is not None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("unit %s on %s", args.power_unit, device)
+        _run_power_unit(
+            args.power_unit, study_cfg, real_reps, shard_dir, locations, device
+        )
+        return 0
+    _write_power_note(args, study_cfg, real_reps, shard_dir, locations, real_names)
     return 0
 
 
