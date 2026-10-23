@@ -67,3 +67,28 @@ def test_controls_reject_nothing_when_radius_is_independent_of_direction() -> No
         row = controls.run_setup(setup, CFG, rng)
         assert float(row["r2 (nested CV, kernel)"]) < 0.1, setup.name
         assert float(row["permutation p"]) > 0.05, setup.name
+
+
+def _table(r2: float, p: float = 0.002) -> list[dict[str, str]]:
+    same = {"space": "z", "setup": "same views (all 8): rho_bar ~ u_hat"}
+    reliability = {"space": "z", "setup": controls.RELIABILITY_SETUP}
+    return [
+        {**same, controls.R2: str(r2), "null max": "0.003", "permutation p": str(p)}
+        | {"F": "50"},
+        {**reliability, controls.R2: "0.9", "null max": "", "permutation p": ""}
+        | {"F": ""},
+    ]
+
+
+def test_aggregate_controls_reports_mean_std_and_least_favorable_values() -> None:
+    rows = controls.aggregate_controls(
+        {0.05: [_table(0.90), _table(0.94, p=0.01)], 0.1: [_table(0.8)]}
+    )
+    assert [(r["lambda"], r["seeds"]) for r in rows[::2]] == [(0.05, 2), (0.1, 1)]
+    first = rows[0]
+    assert first[controls.R2] == "0.92 ± 0.028"
+    assert first["worst permutation p"] == 0.01 and first["min F"] == 50.0
+    assert "min F" not in rows[1]  # reliability row has only R^2
+    assert rows[2][controls.R2] == "0.8"  # one seed: no std
+    with pytest.raises(ValueError, match="different rows"):
+        controls.aggregate_controls({0.05: [_table(0.9), _table(0.9)[:1]]})
