@@ -14,6 +14,12 @@ from lejepa_norm.eval import features
 from lejepa_norm.eval import shards
 
 N, K, D = 200, 4, 8
+
+
+def _quiet(message: str) -> None:
+    del message
+
+
 CFG = config.EvalConfig(cv_folds=5, max_kernel_images=N)
 
 
@@ -59,7 +65,7 @@ def test_sweep_tracks_planted_onset_and_aggregates_over_seeds(
     assert dynamics.available_epochs(tmp_path, runs[0]) == [10, 20]
 
     results = {
-        run: dynamics.run_epoch_sweep(tmp_path, run, CFG, seed=0, num_permutations=3)
+        run: dynamics.run_epoch_sweep(tmp_path, run, CFG, 0, 3, progress=_quiet)
         for run in runs
     }
     for rows in results.values():
@@ -78,6 +84,47 @@ def test_sweep_tracks_planted_onset_and_aggregates_over_seeds(
     assert curve.epochs == [10, 20] and curve.mean[1] > curve.mean[0] + 0.5
 
 
+def test_unit_is_resumable_and_settings_are_part_of_the_key(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "run_s0", 10, 1.0, 1)
+    messages: list[str] = []
+    first = dynamics.run_unit(tmp_path, "run_s0", 10, CFG, 0, 2, messages.append)
+    assert dynamics.unit_path(tmp_path, "run_s0", 10).is_file()
+    assert any("setup" in m for m in messages) and "done" in messages[-1]
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("recomputed a finished unit")
+
+    monkeypatch.setattr(dynamics, "epoch_row", boom)
+    again = dynamics.run_unit(tmp_path, "run_s0", 10, CFG, 0, 2, messages.append)
+    assert again == first and "skipped" in messages[-1]
+    with pytest.raises(AssertionError):  # other settings: not reused
+        dynamics.run_unit(tmp_path, "run_s0", 10, CFG, 0, 3, _quiet)
+    # A torn shard is recomputed rather than trusted.
+    dynamics.unit_path(tmp_path, "run_s0", 10).write_text("{")
+    with pytest.raises(AssertionError):
+        dynamics.run_unit(tmp_path, "run_s0", 10, CFG, 0, 2, _quiet)
+
+
+def test_collect_reads_shards_and_reports_missing_units(
+    tmp_path: pathlib.Path,
+) -> None:
+    for run in ("run_s0", "run_s1"):
+        _write(tmp_path, run, 10, 0.0, 1)
+        _write(tmp_path, run, 20, 1.0, 2)
+    for epoch in (10, 20):
+        dynamics.run_unit(tmp_path, "run_s0", epoch, CFG, 0, 2, _quiet)
+    dynamics.run_unit(tmp_path, "run_s1", 10, CFG, 0, 2, _quiet)
+    messages: list[str] = []
+    runs = dynamics.collect(tmp_path, ["run_s0", "run_s1"], CFG, 0, 2, messages.append)
+    assert [r["epoch"] for r in runs["run_s0"]] == [10, 20]
+    assert [r["epoch"] for r in runs["run_s1"]] == [10]
+    assert messages == ["run_s1 epoch 20: no valid shard, left out"]
+    with pytest.raises(FileNotFoundError):
+        dynamics.collect(tmp_path, ["run_s0"], CFG, 0, 5, _quiet)  # other settings
+
+
 def test_checkpoint_epoch_parses_periodic_names_only() -> None:
     assert dynamics.checkpoint_epoch("runs/x/epoch_0030.pt") == 30
     with pytest.raises(ValueError):
@@ -86,7 +133,7 @@ def test_checkpoint_epoch_parses_periodic_names_only() -> None:
 
 def test_sweep_without_dumps_fails(tmp_path: pathlib.Path) -> None:
     with pytest.raises(FileNotFoundError):
-        dynamics.run_epoch_sweep(tmp_path, "nope", CFG, seed=0, num_permutations=0)
+        dynamics.run_epoch_sweep(tmp_path, "nope", CFG, 0, 0, progress=_quiet)
 
 
 def test_analyze_epoch_sweep_mode_writes_tables(
@@ -108,13 +155,20 @@ def test_analyze_epoch_sweep_mode_writes_tables(
     assert spec is not None and spec.loader is not None
     app = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(app)
-    argv = [
+    common = [
         "--config",
         str(repo / "configs" / "base.yaml"),
         "--set",
         "eval.num_permutations=2",
         "--set",
         f"eval.max_kernel_images={N}",
+    ]
+    for run in ("run_s0", "run_s1"):
+        for epoch in ("10", "20"):
+            assert app.main([*common, "--epoch-unit", run, epoch]) == 0
+    assert not (tmp_path / "notes").exists()  # units write shards, not notes
+    argv = [
+        *common,
         "--epoch-sweep",
         "run_s0",
         "run_s1",

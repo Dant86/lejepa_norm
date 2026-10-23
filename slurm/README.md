@@ -10,6 +10,7 @@ preemption: [batch-jobs guide](https://cluster-policy.ds.uchicago.edu/using-the-
 | `train.sbatch` | `apps/train.py --resume auto` | 1 GPU | continues from `resume.pt` |
 | `embed.sbatch` | `apps/embed.py --resume` | 1 GPU | writes only missing shards |
 | `embed_epochs.sbatch` | `apps/embed.py --resume` on every `epoch_XXXX.pt`, `stl10_test` only, dumps under `radius_dynamics/<run>/epoch_XXXX` | 1 GPU | writes only missing shards |
+| `analyze_epochs.sbatch` | `apps/analyze.py --epoch-unit` as a job array, one (run, epoch) per task, JSON shard each; aggregate with `--epoch-sweep` | CPU, 8 | skips finished shards |
 | `analyze.sbatch` | `apps/analyze.py` | CPU | recomputes (idempotent) |
 
 All templates request `--partition=general --qos=general --time=12:00:00`

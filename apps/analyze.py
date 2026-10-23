@@ -19,12 +19,15 @@ result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
 section; no other analysis runs and no figures are made.
 
-With `--epoch-sweep RUN...`, the redundancy R^2, kappa_z, ICC and reliability of
-`z` are computed on the per-epoch `stl10_test` dumps of each run (written by
-`apps/embed.py` under `radius_dynamics/RUN/epoch_XXXX`, see
-`lejepa_norm.eval.dynamics`) and written as per-run tables, a table by epoch
-(mean ± std over runs) and a figure. The permutation null uses
-`eval.num_permutations` repetitions (set it low, e.g. 5).
+The epoch sweep of the redundancy of `z` (see `lejepa_norm.eval.dynamics`) works
+on the per-epoch `stl10_test` dumps written by `apps/embed.py` under
+`radius_dynamics/RUN/epoch_XXXX` and has two steps. `--epoch-unit RUN EPOCH`
+computes the R^2, kappa_z, ICC and reliability of one (run, epoch) and writes one
+JSON shard (resumable: a finished shard is reused; this is what each job of
+`slurm/analyze_epochs.sbatch` runs; no note is written). `--epoch-sweep RUN...`
+is the cheap aggregation: it reads the shards (computing none) and writes per-run
+tables, a table by epoch (mean ± std over runs) and a figure into `--note`. The
+permutation null uses `eval.num_permutations` repetitions.
 
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
@@ -41,7 +44,9 @@ Examples:
         a_l0.05_s1_controls.md --note radius-conditional/controls_summary.md
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
-    python apps/analyze.py --config configs/base.yaml --set eval.num_permutations=5 \
+    python apps/analyze.py --config configs/base.yaml --set eval.num_permutations=20 \
+        --epoch-unit a_l0.05_s0 10
+    python apps/analyze.py --config configs/base.yaml --set eval.num_permutations=20 \
         --epoch-sweep a_l0.05_s0 a_l0.05_s1 --note radius_dynamics/sweep.md
 """
 
@@ -101,9 +106,15 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Epoch sweep of the redundancy of z over the per-epoch dumps of "
         "these runs (needs --config), into --note.",
     )
+    mode.add_argument(
+        "--epoch-unit",
+        nargs=2,
+        metavar=("RUN", "EPOCH"),
+        help="Compute and store the shard of one (run, epoch) of the epoch sweep "
+        "(needs --config; writes no note).",
+    )
     parser.add_argument(
         "--note",
-        required=True,
         type=pathlib.Path,
         help="Experiment note, relative to LEJEPA_NORM_NOTES_DIR.",
     )
@@ -117,10 +128,11 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: run just the controls of the redundancy result.",
     )
     args = parser.parse_args(argv)
-    if (args.run_name is not None or args.epoch_sweep is not None) and (
-        args.config is None
-    ):
-        parser.error("--run-name and --epoch-sweep require --config")
+    needs_config = (args.run_name, args.epoch_sweep, args.epoch_unit)
+    if any(m is not None for m in needs_config) and args.config is None:
+        parser.error("--run-name, --epoch-sweep and --epoch-unit require --config")
+    if args.epoch_unit is None and args.note is None:
+        parser.error("--note is required (except with --epoch-unit)")
     if args.redundancy_controls and args.run_name is None:
         parser.error("--redundancy-controls requires --run-name")
     return args
@@ -346,16 +358,32 @@ def _run_aggregate_controls(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_epoch_unit(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    run, epoch = args.epoch_unit
+    dynamics.run_unit(
+        locations.embed_dir,
+        run,
+        int(epoch),
+        cfg.eval,
+        cfg.seed,
+        cfg.eval.num_permutations,
+    )
+    return 0
+
+
 def _run_epoch_sweep(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
     note = locations.notes_dir / args.note
-    runs = {
-        run: dynamics.run_epoch_sweep(
-            locations.embed_dir, run, cfg.eval, cfg.seed, cfg.eval.num_permutations
-        )
-        for run in args.epoch_sweep
-    }
+    runs = dynamics.collect(
+        locations.embed_dir,
+        args.epoch_sweep,
+        cfg.eval,
+        cfg.seed,
+        cfg.eval.num_permutations,
+    )
     for run, rows in runs.items():
         reporting.update_section(
             note,
@@ -420,6 +448,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_sweep(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
+    if args.epoch_unit is not None:
+        return _run_epoch_unit(args)
     if args.epoch_sweep is not None:
         return _run_epoch_sweep(args)
     if args.redundancy_controls:

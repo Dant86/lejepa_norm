@@ -16,12 +16,21 @@ The R^2 values use the nested-CV kernel ridge of `controls`/`redundancy` on one
 fixed random subset of images (the same images at every epoch). The permutation
 null is run with only a few repetitions (`num_permutations`); it is a sanity check
 here, not a test.
+
+The work is split into independent, resumable units: one (run, epoch) is one
+`run_unit` call that writes one JSON shard `<embed_dir>/radius_dynamics_rows/<run>/
+epoch_XXXX.json` (atomically; an existing shard computed with the same settings is
+reused). `collect` reads the shards back for the cheap final aggregation. Each unit
+can therefore be its own SLURM job (`slurm/analyze_epochs.sbatch`).
 """
 
+import collections.abc
 import dataclasses
+import json
 import os
 import pathlib
 import re
+import time
 
 import numpy
 import numpy.typing
@@ -38,6 +47,8 @@ Row = analysis.Row
 FloatArray = numpy.typing.NDArray[numpy.float64]
 
 DUMP_ROOT = "radius_dynamics"
+SHARD_ROOT = "radius_dynamics_rows"
+Progress = collections.abc.Callable[[str], None]
 # Row keys, in table order.
 METRICS = (
     "kappa_z",
@@ -50,6 +61,21 @@ METRICS = (
 )
 _EPOCH_DIR = re.compile(r"epoch_(\d+)$")
 _CHECKPOINT = re.compile(r"epoch_(\d+)\.pt$")
+
+
+def print_progress(message: str) -> None:
+    """Default progress sink: a UTC-stamped line on stdout, flushed at once."""
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"[{stamp}] {message}", flush=True)
+
+
+def _no_progress(message: str) -> None:
+    del message
+
+
+def unit_path(embed_dir: str | os.PathLike[str], run: str, epoch: int) -> pathlib.Path:
+    """The JSON shard of one (run, epoch) unit."""
+    return pathlib.Path(embed_dir) / SHARD_ROOT / run / f"epoch_{epoch:04d}.json"
 
 
 def dump_name(run: str, epoch: int) -> str:
@@ -86,6 +112,7 @@ def epoch_row(
     cfg: config.EvalConfig,
     seed: int,
     num_permutations: int,
+    progress: Progress = _no_progress,
 ) -> Row:
     """All statistics of one epoch's `stl10_test` dump.
 
@@ -95,6 +122,7 @@ def epoch_row(
         seed: Seeds the image subset (identical for every epoch), the fold
             splits and the permutations.
         num_permutations: Permutation-null repetitions per regression.
+        progress: Receives one message per regression setup, with its seconds.
 
     Returns:
         The metrics of `METRICS` (without the epoch and seed columns).
@@ -108,7 +136,11 @@ def epoch_row(
     x = aug[idx]
     run_cfg = dataclasses.replace(cfg, num_permutations=num_permutations)
     setups = controls.view_setups(x)[:3]  # same views and the two disjoint halves
-    rows = [controls.run_setup(s, run_cfg, rng) for s in setups]
+    rows: list[Row] = []
+    for setup in setups:
+        start = time.perf_counter()
+        rows.append(controls.run_setup(setup, run_cfg, rng))
+        progress(f"setup {setup.name!r}: {time.perf_counter() - start:.1f} s")
     r2 = [float(r[controls.R2]) for r in rows]
     nulls = [float(r["null max"]) for r in rows if int(r["permutations"]) > 0]
     return {
@@ -122,14 +154,85 @@ def epoch_row(
     }
 
 
+def _settings(cfg: config.EvalConfig, seed: int, num_permutations: int) -> Row:
+    return {
+        "seed": seed,
+        "max_kernel_images": cfg.max_kernel_images,
+        "cv_folds": cfg.cv_folds,
+        "num_permutations": num_permutations,
+    }
+
+
+def _read_shard(path: pathlib.Path, settings: Row) -> Row | None:
+    """The row of a finished unit, or None if absent or computed differently."""
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError:  # a torn file from a killed writer
+        return None
+    return payload["row"] if payload.get("settings") == settings else None
+
+
+def run_unit(
+    embed_dir: str | os.PathLike[str],
+    run: str,
+    epoch: int,
+    cfg: config.EvalConfig,
+    seed: int,
+    num_permutations: int,
+    progress: Progress = print_progress,
+) -> Row:
+    """Computes (or reuses) the shard of one (run, epoch) unit.
+
+    Args:
+        embed_dir: Embedding root holding the dumps and, written here, the shards.
+        run: Run name.
+        epoch: Epoch of the dump.
+        cfg: Analysis settings.
+        seed: See `epoch_row`.
+        num_permutations: See `epoch_row`.
+        progress: Receives progress messages.
+
+    Returns:
+        The row, with the epoch column first.
+
+    Raises:
+        FileNotFoundError: The unit has no `stl10_test` dump.
+    """
+    path = unit_path(embed_dir, run, epoch)
+    settings = _settings(cfg, seed, num_permutations)
+    done = _read_shard(path, settings)
+    if done is not None:
+        progress(f"{run} epoch {epoch}: shard exists, skipped")
+        return done
+    directory = dumps.set_dir(embed_dir, dump_name(run, epoch), dumps.STL10_TEST)
+    shard = dumps.load_set(directory)
+    if shard is None:
+        raise FileNotFoundError(f"no stl10_test dump for {run} epoch {epoch}")
+    progress(f"{run} epoch {epoch}: loaded {shard.z.shape}")
+    start = time.perf_counter()
+    row: Row = {
+        "epoch": epoch,
+        **epoch_row(shard, cfg, seed, num_permutations, progress),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    tmp.write_text(json.dumps({"settings": settings, "row": row}))
+    tmp.replace(path)
+    progress(f"{run} epoch {epoch}: done in {time.perf_counter() - start:.1f} s")
+    return row
+
+
 def run_epoch_sweep(
     embed_dir: str | os.PathLike[str],
     run: str,
     cfg: config.EvalConfig,
     seed: int,
     num_permutations: int,
+    progress: Progress = print_progress,
 ) -> list[Row]:
-    """One `epoch_row` per available epoch dump of `run` (loads one at a time).
+    """`run_unit` for every available epoch dump of `run`, sequentially.
 
     Raises:
         FileNotFoundError: `run` has no epoch dumps.
@@ -137,13 +240,42 @@ def run_epoch_sweep(
     epochs = available_epochs(embed_dir, run)
     if not epochs:
         raise FileNotFoundError(f"no epoch dumps for {run} under {embed_dir}")
-    rows: list[Row] = []
-    for epoch in epochs:
-        directory = dumps.set_dir(embed_dir, dump_name(run, epoch), dumps.STL10_TEST)
-        shard = dumps.load_set(directory)
-        assert shard is not None  # available_epochs checked for shards
-        rows.append({"epoch": epoch, **epoch_row(shard, cfg, seed, num_permutations)})
-    return rows
+    return [
+        run_unit(embed_dir, run, epoch, cfg, seed, num_permutations, progress)
+        for epoch in epochs
+    ]
+
+
+def collect(
+    embed_dir: str | os.PathLike[str],
+    runs: collections.abc.Sequence[str],
+    cfg: config.EvalConfig,
+    seed: int,
+    num_permutations: int,
+    progress: Progress = print_progress,
+) -> dict[str, list[Row]]:
+    """Rows of the finished units of each run (ascending epochs), from the shards.
+
+    Units with missing or differently-configured shards are reported through
+    `progress` and left out (`curve` uses the epochs every run shares).
+
+    Raises:
+        FileNotFoundError: A run has no finished unit.
+    """
+    settings = _settings(cfg, seed, num_permutations)
+    result: dict[str, list[Row]] = {}
+    for run in runs:
+        rows: list[Row] = []
+        for epoch in available_epochs(embed_dir, run):
+            row = _read_shard(unit_path(embed_dir, run, epoch), settings)
+            if row is None:
+                progress(f"{run} epoch {epoch}: no valid shard, left out")
+            else:
+                rows.append(row)
+        if not rows:
+            raise FileNotFoundError(f"no finished epoch units for {run}")
+        result[run] = rows
+    return result
 
 
 @dataclasses.dataclass(frozen=True)
