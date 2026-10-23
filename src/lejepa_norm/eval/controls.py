@@ -18,6 +18,7 @@ asks, on the same images and with the same nested-CV kernel ridge:
 """
 
 import dataclasses
+import re
 
 import numpy
 import numpy.typing
@@ -167,4 +168,66 @@ def run_redundancy_controls(
                 "r2 (nested CV, kernel)": split_half_reliability(x),
             }
         )
+    return rows
+
+
+R2 = "r2 (nested CV, kernel)"
+_RUN_NAME = re.compile(r"\(run `([^`]+)`\)")
+
+
+def run_name(section: str) -> str:
+    """Run name from the heading of a generated controls section."""
+    match = _RUN_NAME.search(section)
+    if match is None:
+        raise ValueError("no run name in the controls section heading")
+    return match.group(1)
+
+
+def _mean_std(values: list[float]) -> str:
+    arr = numpy.asarray(values)
+    if arr.size < 2:
+        return f"{arr.mean():.4g}"
+    return f"{arr.mean():.4g} ± {arr.std(ddof=1):.2g}"
+
+
+def aggregate_controls(runs: dict[float, list[list[dict[str, str]]]]) -> list[Row]:
+    """Aggregates the controls tables of several seeds per lambda.
+
+    Args:
+        runs: For each lambda, one parsed controls table (cells as text, as read
+            back from a note) per seed. All tables must list the same rows.
+
+    Returns:
+        One row per lambda, space and setup: held-out `R^2` as mean ± std over
+        seeds, the largest permutation-null maximum, the worst (largest)
+        permutation p-value and the smallest F statistic over seeds. Reliability
+        rows only have the `R^2` column.
+
+    Raises:
+        ValueError: The seeds of a lambda list different rows.
+    """
+    rows: list[Row] = []
+    for lam, tables in sorted(runs.items()):
+        keys = [(r["space"], r["setup"]) for r in tables[0]]
+        for table in tables[1:]:
+            if [(r["space"], r["setup"]) for r in table] != keys:
+                raise ValueError(f"lambda={lam}: seeds list different rows")
+        for i, (space, setup) in enumerate(keys):
+            cells = [table[i] for table in tables]
+            row: Row = {
+                "lambda": lam,
+                "space": space,
+                "setup": setup,
+                "seeds": len(tables),
+                R2: _mean_std([float(c[R2]) for c in cells]),
+            }
+            if setup != RELIABILITY_SETUP:
+                row["null max (max over seeds)"] = max(
+                    float(c["null max"]) for c in cells
+                )
+                row["worst permutation p"] = max(
+                    float(c["permutation p"]) for c in cells
+                )
+                row["min F"] = min(float(c["F"]) for c in cells)
+            rows.append(row)
     return rows

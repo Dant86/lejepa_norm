@@ -131,6 +131,37 @@ def update_section(note: str | os.PathLike[str], name: str, content: str) -> Non
     path.write_text(text)
 
 
+def read_section(note: str | os.PathLike[str], name: str) -> str:
+    """Returns the content of the generated section `name` of a note.
+
+    Raises:
+        ValueError: The section is not in the note exactly once.
+    """
+    text = pathlib.Path(note).read_text()
+    begin, end = _begin(name), _end(name)
+    if (text.count(begin), text.count(end)) != (1, 1):
+        raise ValueError(f"section {name!r} not found exactly once in {note}")
+    return text[text.index(begin) + len(begin) : text.index(end)].strip()
+
+
+def parse_table(markdown: str) -> list[dict[str, str]]:
+    """Parses the first markdown table in `markdown` (inverse of `markdown_table`).
+
+    Returns:
+        One mapping of column title to cell text per body row.
+    """
+    lines = [ln for ln in markdown.splitlines() if ln.startswith("|")]
+    if len(lines) < 2:
+        return []
+
+    def cells(line: str) -> list[str]:
+        parts = re.split(r"(?<!\\)\|", line.strip()[1:-1])
+        return [c.strip().replace("\\|", "|") for c in parts]
+
+    header = cells(lines[0])
+    return [dict(zip(header, cells(ln), strict=True)) for ln in lines[2:]]
+
+
 def _insert_in_results(text: str, block: str) -> str:
     lines = text.splitlines()
     try:
