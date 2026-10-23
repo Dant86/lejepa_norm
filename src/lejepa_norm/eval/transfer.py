@@ -57,6 +57,9 @@ class TransferCell:
         n_fit: Corrupted images whose clean twin was in the fit.
         residual_fit: Mean residual on those.
         r2_fit: Transferred `R^2` on those.
+        residual_domain: Mean residual on the held-out twins of a map fitted on
+            the corrupted fit twins of this cell (in-domain control).
+        r2_domain: `R^2` of that in-domain map on the held-out twins.
     """
 
     corruption: str
@@ -70,6 +73,8 @@ class TransferCell:
     n_fit: int
     residual_fit: metrics.Estimate
     r2_fit: float
+    residual_domain: metrics.Estimate
+    r2_domain: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -165,6 +170,8 @@ def run_transfer(
             fit = cell & is_fit[twin]
             res_held = rho_c[held] - pred_c[held]
             res_fit = rho_c[fit] - pred_c[fit]
+            domain = redundancy.FittedKernelRidge(u_c[fit], rho_c[fit], rng)
+            res_domain = rho_c[held] - domain.predict(u_c[held])
             cells.append(
                 TransferCell(
                     corruption=str(name),
@@ -180,6 +187,8 @@ def run_transfer(
                     n_fit=int(fit.sum()),
                     residual_fit=_mean(res_fit, nb, rng),
                     r2_fit=_r2(rho_c[fit], res_fit),
+                    residual_domain=_mean(res_domain, nb, rng),
+                    r2_domain=_r2(rho_c[held], res_domain),
                 )
             )
     res_clean = rho_clean[held_idx] - pred_clean[held_idx]
@@ -209,6 +218,8 @@ def table_rows(result: TransferResult) -> list[Row]:
             "nn_cos": c.nn_cos,
             "residual (fit twins)": analysis.format_estimate(c.residual_fit),
             "R^2 (fit twins)": c.r2_fit,
+            "residual (in-domain map)": analysis.format_estimate(c.residual_domain),
+            "R^2 (in-domain map)": c.r2_domain,
         }
         for c in result.cells
     ]
@@ -226,6 +237,8 @@ def table_rows(result: TransferResult) -> list[Row]:
             "nn_cos": result.clean_nn_cos,
             "residual (fit twins)": "",
             "R^2 (fit twins)": "",
+            "residual (in-domain map)": "",
+            "R^2 (in-domain map)": "",
         }
     )
     return rows
@@ -243,10 +256,18 @@ def _leading_float(cell: str) -> float:
 
 
 def _mean_std(values: list[float]) -> str:
+    if not values:
+        return ""
     arr = numpy.asarray(values)
     if arr.size < 2:
         return f"{arr.mean():.3f}"
     return f"{arr.mean():.3f} ± {arr.std(ddof=1):.3f}"
+
+
+def _fraction(residuals: list[float], mean_raw: float) -> float:
+    if not residuals or abs(mean_raw) <= 1e-12:
+        return float("nan")
+    return float(numpy.mean(residuals)) / mean_raw
 
 
 def aggregate_transfer(runs: dict[float, list[list[dict[str, str]]]]) -> list[Row]:
@@ -275,6 +296,11 @@ def aggregate_transfer(runs: dict[float, list[list[dict[str, str]]]]) -> list[Ro
             raw = [_leading_float(c["raw shift"]) for c in cells]
             res = [_leading_float(c["residual (held-out twins)"]) for c in cells]
             mean_raw = float(numpy.mean(raw))
+            dom: list[float] = []
+            dom_r2: list[float] = []
+            if cells[0].get("residual (in-domain map)", "").strip():
+                dom = [_leading_float(c["residual (in-domain map)"]) for c in cells]
+                dom_r2 = [float(c["R^2 (in-domain map)"]) for c in cells]
             rows.append(
                 {
                     "lambda": lam,
@@ -286,11 +312,10 @@ def aggregate_transfer(runs: dict[float, list[list[dict[str, str]]]]) -> list[Ro
                     "R^2 (held-out twins)": _mean_std(
                         [float(c["R^2 (held-out twins)"]) for c in cells]
                     ),
-                    "unexplained fraction": (
-                        float(numpy.mean(res)) / mean_raw
-                        if abs(mean_raw) > 1e-12
-                        else float("nan")
-                    ),
+                    "unexplained fraction": _fraction(res, mean_raw),
+                    "residual (in-domain map)": _mean_std(dom),
+                    "R^2 (in-domain map)": _mean_std(dom_r2),
+                    "unexplained fraction (in-domain)": _fraction(dom, mean_raw),
                 }
             )
     return rows

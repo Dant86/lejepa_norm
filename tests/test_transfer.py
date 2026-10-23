@@ -1,5 +1,7 @@
 """Radius transfer: a radius that is a function of direction transfers, a shift not."""
 
+import collections.abc
+
 import numpy
 import pytest
 
@@ -24,11 +26,12 @@ def _shard(
     corruption: str,
     severity: int,
     rng: numpy.random.Generator,
+    fn: collections.abc.Callable[[numpy.ndarray], numpy.ndarray] = _log_radius,
 ) -> shards.EmbeddingShard:
     """Views jittered around `base`; radius = f(base) + offset + noise."""
     n = base.shape[0]
     unit = features.direction(base[:, None, :] + 0.05 * rng.normal(size=(n, K + 1, D)))
-    rho = _log_radius(base) + log_radius_offset
+    rho = fn(base) + log_radius_offset
     rho = rho[:, None] + 0.02 * rng.normal(size=(n, K + 1))
     z = (unit * numpy.exp(rho)[..., None]).astype(numpy.float32)
     return shards.EmbeddingShard(
@@ -48,11 +51,19 @@ def _moved(base: numpy.ndarray, rng: numpy.random.Generator) -> numpy.ndarray:
     return features.direction(base + push + 0.1 * rng.normal(size=base.shape))
 
 
-def _run(radius_offset: float) -> transfer.TransferResult:
+def _other_function(u: numpy.ndarray) -> numpy.ndarray:
+    """A different deterministic function of the direction."""
+    return -1.5 * u[:, 0] + 4.0 * u[:, 4] * u[:, 5] + numpy.cos(4.0 * u[:, 6])
+
+
+def _run(
+    radius_offset: float,
+    fn: collections.abc.Callable[[numpy.ndarray], numpy.ndarray] = _log_radius,
+) -> transfer.TransferResult:
     rng = numpy.random.default_rng(0)
     base = features.direction(rng.normal(size=(N, D)))
     test = _shard(base, 0.0, "", 0, rng)
-    corrupt = _shard(_moved(base, rng), radius_offset, "noise", 3, rng)
+    corrupt = _shard(_moved(base, rng), radius_offset, "noise", 3, rng, fn)
     return transfer.run_transfer(test, corrupt, CFG, seed=1)
 
 
@@ -117,3 +128,23 @@ def test_aggregate_transfer_averages_seeds_and_reports_unexplained_fraction() ->
     assert row["unexplained fraction"] == pytest.approx(-0.01 / -0.15)
     with pytest.raises(ValueError):
         transfer.aggregate_transfer({0.05: [table(-0.2, 0.0, 0.9), []]})
+
+
+def test_in_domain_map_recovers_a_different_function_but_not_extra_information() -> (
+    None
+):
+    # Corruption applies another deterministic function of the direction: the clean
+    # map fails, the map fitted on corrupted data recovers it.
+    (other,) = _run(0.0, _other_function).cells
+    assert other.r2_held < 0.5 and other.r2_domain > 0.9
+    assert abs(other.residual_domain.value) < 0.05
+    # Per-image radius information independent of the direction: neither map can
+    # predict it, so the in-domain R^2 stays low too.
+    noise = numpy.random.default_rng(9).normal(size=N)
+
+    def noisy(u: numpy.ndarray) -> numpy.ndarray:
+        return _log_radius(u) + 0.7 * noise[: u.shape[0]]
+
+    (extra,) = _run(0.0, noisy).cells
+    assert extra.r2_held < 0.6 and extra.r2_domain < 0.6
+    assert extra.r2_domain < other.r2_domain - 0.3
