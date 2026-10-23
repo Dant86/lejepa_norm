@@ -10,6 +10,10 @@ the logs hold per-view-type statistics (global vs local views), also their
 columns and curves of kappa_z and ||z|| mean per view type. It needs no embedding
 dumps and can be run while the sweep is still training.
 
+With `--aggregate-controls NOTE...` the generated controls sections of several
+per-run notes are read back and aggregated over seeds per lambda (mean ± std);
+nothing is recomputed.
+
 With `--redundancy-controls` (per-run mode), only the controls of the redundancy
 result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
@@ -34,6 +38,8 @@ Examples:
         --note radius-conditional/variant_a.md --set eval.num_bootstrap=200
     python apps/analyze.py --config configs/base.yaml --run-name a_l0.05_s0 \
         --note radius-conditional/variant_a_controls.md --redundancy-controls
+    python apps/analyze.py --aggregate-controls a_l0.05_s0_controls.md \
+        a_l0.05_s1_controls.md --note radius-conditional/controls_summary.md
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
     python apps/analyze.py --config configs/base.yaml \
@@ -92,6 +98,14 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "--randomize-radius",
         metavar="PREFIX",
         help="k-NN with randomized radius for runs PREFIX_* (needs --config).",
+    )
+    mode.add_argument(
+        "--aggregate-controls",
+        nargs="+",
+        type=pathlib.Path,
+        metavar="CONTROLS_NOTE",
+        help="Aggregate per-run redundancy-controls notes (relative to the notes "
+        "dir) over seeds, per lambda, into --note.",
     )
     parser.add_argument(
         "--note",
@@ -449,6 +463,37 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_aggregate_controls(args: argparse.Namespace) -> int:
+    locations = paths.load_paths()
+    by_lambda: dict[float, list[list[dict[str, str]]]] = {}
+    names: list[str] = []
+    for relative in args.aggregate_controls:
+        section = reporting.read_section(
+            locations.notes_dir / relative, "analyze.redundancy_controls"
+        )
+        name = controls.run_name(section)
+        cfg = config.load_config(locations.runs_dir / name / "config.resolved.yaml")
+        by_lambda.setdefault(cfg.loss.lambda_, []).append(
+            reporting.parse_table(section)
+        )
+        names.append(name)
+    rows = controls.aggregate_controls(by_lambda)
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.redundancy_controls_aggregate",
+        "### Redundancy controls: mean ± std over seeds, per lambda\n\n"
+        f"Runs: {', '.join(f'`{n}`' for n in sorted(names))}. Per-run tables are "
+        "in the individual controls notes; this table only aggregates them. "
+        "`R^2` is the held-out nested-CV kernel-ridge value; `null max`, "
+        "`worst permutation p` and `min F` are the least favorable value over "
+        "seeds (the permutation p-value cannot go below 1 / (1 + permutations)).\n\n"
+        + reporting.markdown_table(rows),
+    )
+    print(f"wrote {note}")
+    return 0
+
+
 def main(argv: collections.abc.Sequence[str]) -> int:
     """Runs the analysis app; returns a process exit code."""
     args = _parse(argv)
@@ -456,6 +501,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_sweep(args)
     if args.randomize_radius is not None:
         return _run_randomize_radius(args)
+    if args.aggregate_controls is not None:
+        return _run_aggregate_controls(args)
     if args.redundancy_controls:
         return _run_redundancy_controls(args)
     cfg = config.load_config(args.config, args.overrides)

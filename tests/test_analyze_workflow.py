@@ -9,6 +9,7 @@ import types
 import numpy
 import pytest
 
+from lejepa_norm import config
 from lejepa_norm import paths
 from lejepa_norm import plotting
 from lejepa_norm.eval import dumps
@@ -225,6 +226,36 @@ def test_analyze_redundancy_controls_mode_writes_only_its_section(
     assert len(rows) == 2 * 6
     same_views = next(ln for ln in rows if ln.startswith("| z | same views"))
     assert "| 8 |" in same_views  # permutations
+    assert app.main(argv) == 0
+    assert note.read_text() == text  # idempotent
+
+
+def test_analyze_aggregates_controls_notes_per_lambda(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fake_run: pathlib.Path
+) -> None:
+    _setup_env(tmp_path, monkeypatch, fake_run)
+    app = _load_app()
+    assert (
+        app.main(_argv("--redundancy-controls", "--set", "eval.num_permutations=8"))
+        == 0
+    )
+    # The run needs a resolved config for the aggregation to find its lambda.
+    cfg = config.load_config(REPO / "configs" / "base.yaml", ["loss.lambda=0.05"])
+    config.save_resolved(cfg, fake_run / "runs" / RUN)
+    note = tmp_path / "notes" / "idea" / "summary.md"
+    argv = [
+        "--aggregate-controls",
+        "idea/exp.md",
+        "idea/exp.md",
+        "--note",
+        "idea/summary.md",
+    ]
+    assert app.main(argv) == 0
+    text = note.read_text()
+    assert "analyze.redundancy_controls_aggregate" in text
+    rows = [ln for ln in text.splitlines() if ln.startswith("| 0.05 |")]
+    assert len(rows) == 2 * 6
+    assert all("| 2 |" in ln for ln in rows)  # two "seeds" (the same note twice)
     assert app.main(argv) == 0
     assert note.read_text() == text  # idempotent
 
