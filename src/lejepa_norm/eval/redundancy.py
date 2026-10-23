@@ -350,6 +350,54 @@ def kernel_ridge_cv(
     return model.fit(y)
 
 
+def fit_predict(
+    u_train: numpy.typing.ArrayLike,
+    y_train: numpy.typing.ArrayLike,
+    u_test: numpy.typing.ArrayLike,
+    kernel: Kernel = "exp_dot",
+    rng: numpy.random.Generator | None = None,
+    tau_multipliers: tuple[float, ...] = DEFAULT_TAU_MULTIPLIERS,
+    alphas: tuple[float, ...] = DEFAULT_ALPHAS,
+) -> FloatArray:
+    """Kernel (or linear) ridge fitted on all of `u_train`, applied to `u_test`.
+
+    Bandwidth and penalty are chosen by exact leave-one-out CV on the training
+    rows, exactly as inside one outer fold of `NestedKernelRidge`; the test rows
+    take no part in the fit, so the predictions are held out.
+
+    Args:
+        u_train: Training inputs, `(M, d)`; unit vectors for `exp_dot`.
+        y_train: Training targets, `(M,)`.
+        u_test: Inputs to predict at, `(N, d)`.
+        kernel: `"exp_dot"` or `"linear"`.
+        rng: Random generator for the bandwidth estimate; seeded with 0 if None.
+        tau_multipliers: Bandwidth grid (multiples of the median cosine distance).
+        alphas: Ridge penalty grid.
+
+    Returns:
+        Predictions at `u_test`, `(N,)`.
+    """
+    rng = rng if rng is not None else numpy.random.default_rng(0)
+    x = numpy.asarray(u_train, dtype=numpy.float64)
+    t = numpy.asarray(y_train, dtype=numpy.float64).ravel()
+    xt = numpy.asarray(u_test, dtype=numpy.float64)
+    if t.size != x.shape[0]:
+        raise ValueError("y_train must have one entry per row of u_train")
+    grid = numpy.asarray(alphas, dtype=numpy.float64)
+    median = _median_cosine_distance(x, rng) if kernel == "exp_dot" else 1.0
+    taus = (1.0,) if kernel == "linear" else tuple(m * median for m in tau_multipliers)
+    best: tuple[float, float, float, _CenteredKernelRidge] | None = None
+    for tau in taus:
+        model = _CenteredKernelRidge(_Spectrum(_gram(x, x, kernel, tau)), t)
+        mse = model.loo_mse(grid)
+        a = int(mse.argmin())
+        if best is None or mse[a] < best[0]:
+            best = (float(mse[a]), tau, float(grid[a]), model)
+    assert best is not None
+    _, tau, alpha, model = best
+    return model.predict(_gram(xt, x, kernel, tau), alpha)
+
+
 @dataclasses.dataclass(frozen=True)
 class PermutationTest:
     """Permutation test of "the target is independent of the inputs".
