@@ -106,6 +106,11 @@ class EvalConfig:
     max_kernel_images: int = 4000
     # Permutations of the radius in the redundancy controls.
     num_permutations: int = 500
+    # Synthetic SIGReg power study (`analyze --sigreg-power`): repetitions per cell,
+    # per gradient estimate and per real-embedding batch average.
+    power_reps: int = 200
+    power_grad_reps: int = 20
+    power_real_reps: int = 20
     # Radius randomizations (permutations) per condition of the k-NN study.
     num_randomizations: int = 5
     # Equivalence margin (accuracy units, 0.005 = 0.5 points) of the same study;
