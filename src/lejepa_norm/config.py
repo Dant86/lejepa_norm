@@ -111,6 +111,11 @@ class EvalConfig:
     power_reps: int = 200
     power_grad_reps: int = 20
     power_real_reps: int = 20
+    # Radius randomizations (permutations) per condition of the k-NN study.
+    num_randomizations: int = 5
+    # Equivalence margin (accuracy units, 0.005 = 0.5 points) of the same study;
+    # fixed before the results were looked at.
+    equivalence_margin: float = 0.005
 
 
 @dataclasses.dataclass

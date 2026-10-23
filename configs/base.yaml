@@ -51,3 +51,7 @@ eval:
   power_reps: 200
   power_grad_reps: 20
   power_real_reps: 20
+  # Radius randomizations (permutations) per condition of `analyze --randomize-radius`.
+  num_randomizations: 5
+  # Equivalence margin (accuracy units) for the same analysis, set before seeing results.
+  equivalence_margin: 0.005
