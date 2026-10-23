@@ -19,6 +19,13 @@ result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
 section; no other analysis runs and no figures are made.
 
+With `--epoch-sweep RUN...`, the redundancy R^2, kappa_z, ICC and reliability of
+`z` are computed on the per-epoch `stl10_test` dumps of each run (written by
+`apps/embed.py` under `radius_dynamics/RUN/epoch_XXXX`, see
+`lejepa_norm.eval.dynamics`) and written as per-run tables, a table by epoch
+(mean ± std over runs) and a figure. The permutation null uses
+`eval.num_permutations` repetitions (set it low, e.g. 5).
+
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
 `LEJEPA_NORM_RUNS_DIR/<run-name>/`), then writes markdown tables into generated
@@ -34,6 +41,8 @@ Examples:
         a_l0.05_s1_controls.md --note radius-conditional/controls_summary.md
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
+    python apps/analyze.py --config configs/base.yaml --set eval.num_permutations=5 \
+        --epoch-sweep a_l0.05_s0 a_l0.05_s1 --note radius_dynamics/sweep.md
 """
 
 import argparse
@@ -50,6 +59,7 @@ from lejepa_norm import reporting
 from lejepa_norm.eval import analysis
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
+from lejepa_norm.eval import dynamics
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sweep
 
@@ -84,6 +94,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Aggregate per-run redundancy-controls notes (relative to the notes "
         "dir) over seeds, per lambda, into --note.",
     )
+    mode.add_argument(
+        "--epoch-sweep",
+        nargs="+",
+        metavar="RUN",
+        help="Epoch sweep of the redundancy of z over the per-epoch dumps of "
+        "these runs (needs --config), into --note.",
+    )
     parser.add_argument(
         "--note",
         required=True,
@@ -100,8 +117,10 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: run just the controls of the redundancy result.",
     )
     args = parser.parse_args(argv)
-    if args.run_name is not None and args.config is None:
-        parser.error("--run-name requires --config")
+    if (args.run_name is not None or args.epoch_sweep is not None) and (
+        args.config is None
+    ):
+        parser.error("--run-name and --epoch-sweep require --config")
     if args.redundancy_controls and args.run_name is None:
         parser.error("--redundancy-controls requires --run-name")
     return args
@@ -327,6 +346,73 @@ def _run_aggregate_controls(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_epoch_sweep(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    note = locations.notes_dir / args.note
+    runs = {
+        run: dynamics.run_epoch_sweep(
+            locations.embed_dir, run, cfg.eval, cfg.seed, cfg.eval.num_permutations
+        )
+        for run in args.epoch_sweep
+    }
+    for run, rows in runs.items():
+        reporting.update_section(
+            note,
+            f"dynamics.run.{run}",
+            f"### Epoch sweep, run `{run}`\n\n" + reporting.markdown_table(rows),
+        )
+    reporting.update_section(
+        note,
+        "dynamics.table",
+        "### Redundancy and kappa_z by epoch: mean ± std over seeds\n\n"
+        f"Runs: {', '.join(f'`{r}`' for r in runs)}. `z` only, `stl10_test`, "
+        f"{cfg.eval.max_kernel_images} images for the regressions (the same images "
+        f"at every epoch), K = {cfg.eval.num_views} augmented views; `r2_same`: "
+        "rho_bar ~ u_hat from all views; `r2_cross`: disjoint view halves (mean of "
+        "both directions); `reliability`: split-half r^2 of rho_bar; `icc`: "
+        "ICC(1) of the log-radius over views; `kappa_z` on the augmented views "
+        f"of all test images (`kappa_z_center`: center view). Permutation null: "
+        f"{cfg.eval.num_permutations} shuffles per regression.\n\n"
+        + reporting.markdown_table(dynamics.aggregate(runs)),
+    )
+    if not args.no_figures:
+        fig = _dynamics_figure(runs)
+        out = plotting.export_png(
+            fig, note.parent / f"{note.stem}_r2_kappa.png", locations.kaleido_chrome
+        )
+        reporting.update_section(
+            note,
+            "dynamics.figure",
+            "### Figure\n\n"
+            + reporting.image_link(out, note, "R^2 and kappa_z vs epoch"),
+        )
+    print(f"wrote {note}")
+    return 0
+
+
+def _dynamics_figure(runs: dict[str, list[dynamics.Row]]) -> plotting.go.Figure:
+    def series(key: str) -> plotting.Series:
+        c = dynamics.curve(runs, key)
+        return plotting.Series(
+            c.epochs, list(c.mean), list(c.mean - c.std), list(c.mean + c.std)
+        )
+
+    return plotting.dual_axis_line_plot(
+        {
+            "R^2 same views": series("r2_same"),
+            "R^2 disjoint halves": series("r2_cross"),
+            "split-half reliability": series("reliability"),
+        },
+        {"kappa_z (right axis)": series("kappa_z")},
+        "Redundancy of the radius and kappa_z over training (mean ± std over seeds)",
+        "epoch",
+        "R^2 / reliability",
+        "kappa_z",
+        right_reference=1.0,
+    )
+
+
 def main(argv: collections.abc.Sequence[str]) -> int:
     """Runs the analysis app; returns a process exit code."""
     args = _parse(argv)
@@ -334,6 +420,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_sweep(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
+    if args.epoch_sweep is not None:
+        return _run_epoch_sweep(args)
     if args.redundancy_controls:
         return _run_redundancy_controls(args)
     cfg = config.load_config(args.config, args.overrides)

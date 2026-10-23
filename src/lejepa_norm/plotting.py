@@ -217,6 +217,85 @@ def line_plot(
     return fig
 
 
+def dual_axis_line_plot(
+    left: collections.abc.Mapping[str, Series],
+    right: collections.abc.Mapping[str, Series],
+    title: str,
+    x_title: str,
+    left_title: str,
+    right_title: str,
+    right_reference: float | None = None,
+) -> go.Figure:
+    """Two groups of lines over a shared x axis, with a second y axis on the right.
+
+    Left series are solid, right series dashed; colors continue across the groups
+    so that no two lines share a color.
+
+    Args:
+        left: Series drawn against the left y axis (name to series).
+        right: Series drawn against the right y axis.
+        title: Figure title.
+        x_title: X axis title.
+        left_title: Left y axis title.
+        right_title: Right y axis title.
+        right_reference: Optional horizontal reference line on the right axis.
+
+    Returns:
+        The figure.
+    """
+    fig = _figure(title, x_title, left_title)
+    fig.update_layout(
+        yaxis2={
+            "title": right_title,
+            "overlaying": "y",
+            "side": "right",
+            "showgrid": False,
+            "linecolor": MUTED_COLOR,
+        },
+        margin={"l": 70, "r": 70, "t": 60, "b": 60},
+    )
+    groups = ((left, "y", "solid"), (right, "y2", "dash"))
+    index = 0
+    for group, axis, dash in groups:
+        for name, s in group.items():
+            error_y = None
+            if s.low is not None and s.high is not None:
+                y = numpy.asarray(s.y, dtype=numpy.float64)
+                error_y = {
+                    "type": "data",
+                    "symmetric": False,
+                    "array": numpy.asarray(s.high, dtype=numpy.float64) - y,
+                    "arrayminus": y - numpy.asarray(s.low, dtype=numpy.float64),
+                    "thickness": 1,
+                    "width": 3,
+                }
+            fig.add_trace(
+                go.Scatter(
+                    x=list(s.x),
+                    y=list(s.y),
+                    mode="lines+markers",
+                    name=name,
+                    yaxis=axis,
+                    line={"color": COLORS[index % len(COLORS)], "dash": dash},
+                    marker={"size": 8},
+                    error_y=error_y,
+                )
+            )
+            index += 1
+    if right_reference is not None:
+        fig.add_shape(
+            type="line",
+            xref="paper",
+            x0=0,
+            x1=1,
+            yref="y2",
+            y0=right_reference,
+            y1=right_reference,
+            line={"color": MUTED_COLOR, "dash": "dot"},
+        )
+    return fig
+
+
 def scatter(
     x: numpy.typing.ArrayLike,
     y: numpy.typing.ArrayLike,
