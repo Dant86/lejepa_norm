@@ -47,3 +47,7 @@ eval:
   max_kernel_images: 4000
   # Permutations of the radius in the redundancy controls (`analyze --redundancy-controls`).
   num_permutations: 500
+  # Radius randomizations (permutations) per condition of `analyze --randomize-radius`.
+  num_randomizations: 5
+  # Equivalence margin (accuracy units) for the same analysis, set before seeing results.
+  equivalence_margin: 0.005

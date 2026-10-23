@@ -11,10 +11,13 @@ probe's softmax.
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
 
 import typing
+import warnings
 
 import numpy
 import numpy.typing
+import sklearn.exceptions
 import sklearn.linear_model
+import sklearn.neural_network
 
 from lejepa_norm.eval import features
 
@@ -162,3 +165,57 @@ class LinearProbe:
     def predict(self, x: numpy.typing.ArrayLike) -> IntArray:
         """Most probable class, `(N,)`."""
         return numpy.argmax(self.predict_proba(x), axis=1).astype(numpy.int64)
+
+
+class MlpProbe:
+    """One-hidden-layer MLP on standardized frozen features, fixed training budget.
+
+    The number of epochs is fixed (no early stopping); `weight_decay` is the L2
+    penalty (scikit-learn's `alpha`) and is chosen by the caller.
+    """
+
+    def __init__(
+        self,
+        x: numpy.typing.ArrayLike,
+        y: numpy.typing.ArrayLike,
+        num_classes: int,
+        weight_decay: float,
+        hidden: int = 256,
+        epochs: int = 100,
+        seed: int = 0,
+    ) -> None:
+        """Fits the MLP.
+
+        Args:
+            x: `(M, d)` training features.
+            y: `(M,)` integer labels in `[0, num_classes)`.
+            num_classes: Number of classes; columns of `predict_proba`.
+            weight_decay: L2 penalty.
+            hidden: Hidden units.
+            epochs: Adam epochs (all of them are run).
+            seed: Initialization and shuffling seed.
+        """
+        arr = numpy.asarray(x, dtype=numpy.float64)
+        self._mean = arr.mean(axis=0)
+        self._std = numpy.where(arr.std(axis=0) > 0, arr.std(axis=0), 1.0)
+        self._num_classes = num_classes
+        self._model = sklearn.neural_network.MLPClassifier(
+            hidden_layer_sizes=(hidden,),
+            alpha=weight_decay,
+            max_iter=epochs,
+            n_iter_no_change=epochs + 1,
+            tol=0.0,
+            random_state=seed,
+        )
+        with warnings.catch_warnings():
+            # Reaching the fixed budget is intended, not a convergence failure.
+            warnings.simplefilter("ignore", sklearn.exceptions.ConvergenceWarning)
+            self._model.fit(
+                (arr - self._mean) / self._std, numpy.asarray(y, dtype=numpy.int64)
+            )
+
+    def predict(self, x: numpy.typing.ArrayLike) -> IntArray:
+        """Most probable class, `(N,)` (unseen classes are never predicted)."""
+        arr = (numpy.asarray(x, dtype=numpy.float64) - self._mean) / self._std
+        seen = numpy.asarray(self._model.classes_, dtype=numpy.int64)
+        return seen[numpy.argmax(self._model.predict_proba(arr), axis=1)]
