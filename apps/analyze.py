@@ -14,6 +14,12 @@ With `--aggregate-controls NOTE...` the generated controls sections of several
 per-run notes are read back and aggregated over seeds per lambda (mean ± std);
 nothing is recomputed.
 
+With `--transfer` (per-run mode), only the clean-to-corrupted transfer of the
+radius map (z only; see `lejepa_norm.eval.transfer`) is run on the `stl10_test` and
+`stl10c` dumps and written to its own section, with two PNGs (raw shift and
+residual per severity) unless `--no-figures`. `--aggregate-transfer NOTE...`
+aggregates such sections over seeds per lambda. h is not analyzed in these modes.
+
 With `--redundancy-controls` (per-run mode), only the controls of the redundancy
 result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
@@ -38,6 +44,10 @@ Examples:
         --note radius-conditional/variant_a.md --set eval.num_bootstrap=200
     python apps/analyze.py --config configs/base.yaml --run-name a_l0.05_s0 \
         --note radius-conditional/variant_a_controls.md --redundancy-controls
+    python apps/analyze.py --config configs/base.yaml --run-name a_l0.05_s0 \
+        --note radius_transfer/a_l0.05_s0.md --transfer
+    python apps/analyze.py --aggregate-transfer radius_transfer/a_l0.05_s0.md \
+        radius_transfer/a_l0.05_s1.md --note radius_transfer/summary.md
     python apps/analyze.py --aggregate-controls a_l0.05_s0_controls.md \
         a_l0.05_s1_controls.md --note radius-conditional/controls_summary.md
     python apps/analyze.py --sweep radius_marginal \
@@ -66,6 +76,7 @@ from lejepa_norm.eval import dumps
 from lejepa_norm.eval import randomization
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sweep
+from lejepa_norm.eval import transfer
 
 _TITLES = {
     analysis.MARGINAL: "Marginal radius (STL-10 test)",
@@ -107,6 +118,14 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Aggregate per-run redundancy-controls notes (relative to the notes "
         "dir) over seeds, per lambda, into --note.",
     )
+    mode.add_argument(
+        "--aggregate-transfer",
+        nargs="+",
+        type=pathlib.Path,
+        metavar="TRANSFER_NOTE",
+        help="Aggregate per-run transfer notes (relative to the notes dir) over "
+        "seeds, per lambda, into --note.",
+    )
     parser.add_argument(
         "--note",
         required=True,
@@ -122,7 +141,14 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Per-run mode only: run just the controls of the redundancy result.",
     )
+    parser.add_argument(
+        "--transfer",
+        action="store_true",
+        help="Per-run mode only: run just the clean-to-corrupted radius transfer.",
+    )
     args = parser.parse_args(argv)
+    if args.transfer and args.run_name is None:
+        parser.error("--transfer requires --run-name")
     if args.run_name is not None and args.config is None:
         parser.error("--run-name requires --config")
     if args.randomize_radius is not None and args.config is None:
@@ -321,6 +347,84 @@ def _run_redundancy_controls(args: argparse.Namespace) -> int:
     return 0
 
 
+def _transfer_figures(
+    result: transfer.TransferResult, note: pathlib.Path, chrome: pathlib.Path | None
+) -> list[str]:
+    prefix = note.parent / note.stem
+    links: list[str] = []
+    panels = (
+        ("raw_shift", "Raw paired radius shift (z)", "mean delta rho"),
+        (
+            "residual_held",
+            "Residual after the clean-fitted map (z, held-out twins)",
+            "mean (observed - predicted) rho",
+        ),
+    )
+    for attribute, title, y_title in panels:
+        series: dict[str, plotting.Series] = {}
+        for corruption in dict.fromkeys(c.corruption for c in result.cells):
+            cells = [c for c in result.cells if c.corruption == corruption]
+            est = [getattr(c, attribute) for c in cells]
+            series[corruption] = plotting.Series(
+                x=[c.severity for c in cells],
+                y=[e.value for e in est],
+                low=[e.low for e in est],
+                high=[e.high for e in est],
+            )
+        out = plotting.export_png(
+            plotting.line_plot(series, title, "severity", y_title, reference=0.0),
+            f"{prefix}_transfer_{attribute}.png",
+            chrome,
+        )
+        links.append(reporting.image_link(out, note, title))
+    return links
+
+
+def _run_transfer(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    test = dumps.load_set(
+        dumps.set_dir(locations.embed_dir, args.run_name, dumps.STL10_TEST)
+    )
+    corrupt = dumps.load_set(
+        dumps.set_dir(locations.embed_dir, args.run_name, dumps.STL10_C)
+    )
+    if test is None or corrupt is None:
+        print(
+            f"need {dumps.STL10_TEST} and {dumps.STL10_C} dumps for {args.run_name}",
+            file=sys.stderr,
+        )
+        return 1
+    result = transfer.run_transfer(test, corrupt, cfg.eval, cfg.seed)
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.radius_transfer",
+        f"### Radius transfer (run `{args.run_name}`)\n\n"
+        "h is not analyzed; LeJEPA's product is z. Kernel ridge `u_hat -> rho_bar` "
+        f"fitted on {result.n_fit} clean `stl10_test` images (hyperparameters by "
+        f"leave-one-out CV on them: tau={result.tau:.3g}, alpha={result.alpha:.3g}), "
+        "applied to the corrupted versions of the other "
+        f"{result.n_held} images (`held-out twins`) and, for comparison, of the fit "
+        "images (`fit twins`). Shifts and residuals are in log-radius units (mean "
+        "over images, 95% bootstrap CI over images with the map held fixed); "
+        "`predicted shift` is the mean of `f(u_corrupted) - f(u_clean twin)`; "
+        "`R^2` is the transferred `R^2` within the cell; `nn_cos` is the "
+        "mean cosine to the nearest fit direction (support check). The last row is "
+        "the same map on the clean held-out images.\n\n"
+        + reporting.markdown_table(transfer.table_rows(result)),
+    )
+    if not args.no_figures:
+        links = _transfer_figures(result, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note,
+            "analyze.radius_transfer_figures",
+            "### Figures\n\n" + "\n\n".join(links),
+        )
+    print(f"wrote {note}")
+    return 0
+
+
 def _randomization_figures(
     comparisons: list[randomization.Comparison],
     note: pathlib.Path,
@@ -463,6 +567,35 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_aggregate_transfer(args: argparse.Namespace) -> int:
+    locations = paths.load_paths()
+    by_lambda: dict[float, list[list[dict[str, str]]]] = {}
+    names: list[str] = []
+    for relative in args.aggregate_transfer:
+        section = reporting.read_section(
+            locations.notes_dir / relative, "analyze.radius_transfer"
+        )
+        name = controls.run_name(section)
+        cfg = config.load_config(locations.runs_dir / name / "config.resolved.yaml")
+        by_lambda.setdefault(cfg.loss.lambda_, []).append(
+            reporting.parse_table(section)
+        )
+        names.append(name)
+    rows = transfer.aggregate_transfer(by_lambda)
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.radius_transfer_aggregate",
+        "### Radius transfer: mean ± std over seeds, per lambda\n\n"
+        f"Runs: {', '.join(f'`{n}`' for n in sorted(names))}. h is not analyzed; "
+        "LeJEPA's product is z. Aggregates the per-run tables (held-out twins); "
+        "`unexplained fraction` is the seed-mean residual over the seed-mean raw "
+        "shift.\n\n" + reporting.markdown_table(rows),
+    )
+    print(f"wrote {note}")
+    return 0
+
+
 def _run_aggregate_controls(args: argparse.Namespace) -> int:
     locations = paths.load_paths()
     by_lambda: dict[float, list[list[dict[str, str]]]] = {}
@@ -503,6 +636,10 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_randomize_radius(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
+    if args.aggregate_transfer is not None:
+        return _run_aggregate_transfer(args)
+    if args.transfer:
+        return _run_transfer(args)
     if args.redundancy_controls:
         return _run_redundancy_controls(args)
     cfg = config.load_config(args.config, args.overrides)
