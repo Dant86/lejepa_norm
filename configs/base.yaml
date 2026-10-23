@@ -47,3 +47,7 @@ eval:
   max_kernel_images: 4000
   # Permutations of the radius in the redundancy controls (`analyze --redundancy-controls`).
   num_permutations: 500
+  # Synthetic SIGReg power study (`analyze --sigreg-power`).
+  power_reps: 200
+  power_grad_reps: 20
+  power_real_reps: 20

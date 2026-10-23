@@ -14,6 +14,12 @@ With `--aggregate-controls NOTE...` the generated controls sections of several
 per-run notes are read back and aggregated over seeds per lambda (mean ± std);
 nothing is recomputed.
 
+With `--sigreg-power` (needs `--config`), the synthetic SIGReg power study of
+`lejepa_norm.eval.sigreg_power` is run (sizes from the config) and written with
+power and gradient tables and a figure; with `--runs-prefix PREFIX` the same
+quantities are added for the `stl10_test` dumps of every run `PREFIX_*`
+(projector output z only).
+
 With `--redundancy-controls` (per-run mode), only the controls of the redundancy
 result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
@@ -34,14 +40,20 @@ Examples:
         a_l0.05_s1_controls.md --note radius-conditional/controls_summary.md
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
+    python apps/analyze.py --sigreg-power --config configs/base.yaml \
+        --runs-prefix radius_marginal --note sigreg_power/power.md
 """
 
 import argparse
 import collections.abc
+import dataclasses
 import math
 import pathlib
 import sys
 import typing
+
+import numpy
+import torch
 
 from lejepa_norm import config
 from lejepa_norm import paths
@@ -51,6 +63,7 @@ from lejepa_norm.eval import analysis
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import runlog
+from lejepa_norm.eval import sigreg_power
 from lejepa_norm.eval import sweep
 
 _TITLES = {
@@ -84,6 +97,15 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Aggregate per-run redundancy-controls notes (relative to the notes "
         "dir) over seeds, per lambda, into --note.",
     )
+    mode.add_argument(
+        "--sigreg-power",
+        action="store_true",
+        help="Synthetic SIGReg power study (needs --config).",
+    )
+    parser.add_argument(
+        "--runs-prefix",
+        help="With --sigreg-power: also analyze the real z of runs PREFIX_*.",
+    )
     parser.add_argument(
         "--note",
         required=True,
@@ -102,6 +124,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.run_name is not None and args.config is None:
         parser.error("--run-name requires --config")
+    if args.sigreg_power and args.config is None:
+        parser.error("--sigreg-power requires --config")
     if args.redundancy_controls and args.run_name is None:
         parser.error("--redundancy-controls requires --run-name")
     return args
@@ -327,6 +351,167 @@ def _run_aggregate_controls(args: argparse.Namespace) -> int:
     return 0
 
 
+def _power_figures(
+    study: sigreg_power.SyntheticStudy,
+    real: list[dict[str, str | float]],
+    note: pathlib.Path,
+    chrome: pathlib.Path | None,
+) -> list[str]:
+    prefix = note.parent / note.stem
+    links: list[str] = []
+
+    def column(
+        rows: list[dict[str, str | float]], where: dict[str, str | float], key: str
+    ) -> list[float]:
+        return [
+            float(r[key]) for r in rows if all(r.get(k) == v for k, v in where.items())
+        ]
+
+    kappas = list(sigreg_power.KAPPAS)
+    statistics = [f"SIGReg, {views} view(s)" for views in (1, study.num_views)] + [
+        "KS vs chi_d"
+    ]
+    series = {
+        f"{statistic} ({family})": plotting.Series(
+            kappas,
+            column(
+                study.power_rows,
+                {"family": family, "statistic": statistic},
+                "power",
+            ),
+        )
+        for family in sigreg_power.FAMILIES
+        for statistic in statistics
+    }
+    out = plotting.export_png(
+        plotting.line_plot(
+            series,
+            "Power at level 0.05 against N(0, I) (N per view, synthetic)",
+            "kappa = Var(||z||^2) / (2 d)",
+            "power",
+            reference=sigreg_power.LEVEL,
+        ),
+        f"{prefix}_power.png",
+        chrome,
+    )
+    links.append(reporting.image_link(out, note, "power against kappa"))
+
+    value_series: dict[str, plotting.Series] = {}
+    for family in sigreg_power.FAMILIES:
+        where: dict[str, str | float] = {
+            "family": family,
+            "statistic": "SIGReg, 1 view(s)",
+        }
+        mean = column(study.power_rows, where, "mean")
+        std = column(study.power_rows, where, "std")
+        value_series[f"synthetic {family}"] = plotting.Series(
+            kappas,
+            mean,
+            [m - s for m, s in zip(mean, std, strict=True)],
+            [m + s for m, s in zip(mean, std, strict=True)],
+        )
+    if real:
+        ordered = sorted(real, key=lambda r: float(r["kappa (center views)"]))
+        value_series["real checkpoints (center view)"] = plotting.Series(
+            [float(r["kappa (center views)"]) for r in ordered],
+            [float(r["SIGReg, center view"]) for r in ordered],
+        )
+    out = plotting.export_png(
+        plotting.line_plot(
+            value_series,
+            "Single-view SIGReg vs kappa (bars: 1 sd over repetitions)",
+            "kappa",
+            "SIGReg",
+            reference=study.null_mean,
+        ),
+        f"{prefix}_value.png",
+        chrome,
+    )
+    links.append(reporting.image_link(out, note, "SIGReg value against kappa"))
+    return links
+
+
+def _run_sigreg_power(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    note = locations.notes_dir / args.note
+    study_cfg = sigreg_power.study_config(cfg)
+    rng = numpy.random.default_rng(study_cfg.seed + 1)
+    study = sigreg_power.run_synthetic(study_cfg)
+    reporting.update_section(
+        note,
+        "sigreg_power.setup",
+        "### Synthetic setup\n\n"
+        + reporting.markdown_table(
+            [
+                {"parameter": key, "value": str(value)}
+                for key, value in dataclasses.asdict(study_cfg).items()
+            ]
+        ),
+    )
+    reporting.update_section(
+        note,
+        "sigreg_power.kurtosis",
+        "### Projection kurtosis: claimed vs exact vs Monte Carlo\n\n"
+        + reporting.markdown_table(sigreg_power.kurtosis_rows(study_cfg, rng)),
+    )
+    reporting.update_section(
+        note,
+        "sigreg_power.power",
+        "### SIGReg value and power against N(0, I)\n\n"
+        f"Null (exact Gaussians): single view {study.null_mean:.4g} ± "
+        f"{study.null_std:.3g}; {study_cfg.num_views} independent views "
+        f"{study.null_views[0]:.4g} ± {study.null_views[1]:.3g}. Power is the "
+        "fraction of repetitions above the 95% null quantile of the same "
+        "statistic.\n\n" + reporting.markdown_table(study.power_rows),
+    )
+    reporting.update_section(
+        note,
+        "sigreg_power.gradient",
+        "### Gradient of single-view SIGReg: radial vs tangential part\n\n"
+        + reporting.markdown_table(study.gradient_rows),
+    )
+    real: list[dict[str, str | float]] = []
+    if args.runs_prefix is not None:
+        generator = torch.Generator().manual_seed(study_cfg.seed + 2)
+        names = sorted(
+            p.name
+            for p in locations.embed_dir.glob(f"{args.runs_prefix}_*")
+            if p.is_dir()
+        )
+        for name in names:
+            shard = sigreg_power.load_real_shard(str(locations.embed_dir), name)
+            if shard is None:
+                continue
+            metrics_file = locations.runs_dir / name / runlog.METRICS_FILE
+            records = runlog.read_metrics(metrics_file) if metrics_file.exists() else []
+            real.append(
+                sigreg_power.real_row(
+                    name,
+                    shard,
+                    study_cfg,
+                    study,
+                    sigreg_power.last_training_dist(records),
+                    rng,
+                    generator,
+                    cfg.eval.power_real_reps,
+                )
+            )
+        reporting.update_section(
+            note,
+            "sigreg_power.real",
+            "### Real z embeddings (STL-10 test, projector output)\n\n"
+            + reporting.markdown_table(real),
+        )
+    if not args.no_figures:
+        links = _power_figures(study, real, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note, "sigreg_power.figures", "### Figures\n\n" + "\n\n".join(links)
+        )
+    print(f"wrote {note}")
+    return 0
+
+
 def main(argv: collections.abc.Sequence[str]) -> int:
     """Runs the analysis app; returns a process exit code."""
     args = _parse(argv)
@@ -334,6 +519,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_sweep(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
+    if args.sigreg_power:
+        return _run_sigreg_power(args)
     if args.redundancy_controls:
         return _run_redundancy_controls(args)
     cfg = config.load_config(args.config, args.overrides)

@@ -48,6 +48,7 @@ graph LR
     EVAL --> DATA
     EVAL --> MOD
     EVAL --> CFG
+    EVAL --> LOSS
     DATA --> CFG
     MOD --> CFG
     LOSS --> CFG
