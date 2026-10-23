@@ -417,7 +417,9 @@ def real_row(
     Single-view SIGReg is evaluated on `real_reps` random batches of
     `cfg.batch_size` test images, on the center view and averaged over the
     augmented views; the synthetic scaled-chi value at the run's own center-view
-    kappa shows how much of it radial spread alone would explain.
+    kappa shows how much of it radial spread alone would explain. The gradient of
+    the center-view SIGReg with respect to `z` is split into radial and tangential
+    parts (`split_gradient`) on the same batches.
 
     Args:
         name: Run name.
@@ -440,10 +442,21 @@ def real_row(
     aug_vals: list[float] = []
     ks_vals: list[float] = []
     batch_kappas: list[float] = []
+    grads: list[dict[str, float]] = []
     for _ in range(real_reps):
         idx = rng.choice(n, size=min(cfg.batch_size, n), replace=False)
         batch = torch.from_numpy(z[idx].astype(numpy.float32))
-        center_vals.append(float(sig(batch[:, 0])))
+        center_z = batch[:, 0].clone().requires_grad_(True)
+        value = sig(center_z)
+        value.backward()  # pyright: ignore[reportUnknownMemberType]
+        assert center_z.grad is not None
+        center_vals.append(float(value.detach()))
+        grads.append(
+            split_gradient(
+                center_z.detach().numpy().astype(numpy.float64),
+                center_z.grad.numpy().astype(numpy.float64),
+            )
+        )
         aug_vals.append(
             float(numpy.mean([float(sig(batch[:, k])) for k in range(1, num_views)]))
         )
@@ -473,6 +486,11 @@ def real_row(
         / study.null_std,
         "synthetic scaled-chi at same kappa": float(synthetic.mean()),
         "KS vs chi_d (batch of N)": float(numpy.mean(ks_vals)),
+        "grad radial rms": float(numpy.mean([g["radial_rms"] for g in grads])),
+        "grad tangential rms": float(numpy.mean([g["tangential_rms"] for g in grads])),
+        "grad restoring corr": float(
+            numpy.nanmean([g["restoring_corr"] for g in grads])
+        ),
         "training SIGReg (last epoch)": "" if training_dist is None else training_dist,
     }
 

@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from lejepa_norm import paths
+from lejepa_norm import reporting
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import shards
 from lejepa_norm.eval import sigreg_power as sp
@@ -168,7 +169,9 @@ def test_app_writes_synthetic_and_real_sections(
     text = (tmp_path / "notes" / "idea" / "power.md").read_text()
     for name in ("setup", "kurtosis", "power", "gradient", "real"):
         assert f"BEGIN GENERATED: sigreg_power.{name}" in text
-    real = [ln for ln in text.splitlines() if ln.startswith("| toy_s0 |")]
-    assert len(real) == 1
-    kappa = float(real[0].split("|")[2])
-    assert 0.6 < kappa < 1.6  # N(0, I) embeddings
+    note = tmp_path / "notes" / "idea" / "power.md"
+    rows = reporting.parse_table(reporting.read_section(note, "sigreg_power.real"))
+    assert [r["run"] for r in rows] == ["toy_s0"]
+    assert 0.6 < float(rows[0]["kappa (center views)"]) < 1.6  # N(0, I) embeddings
+    ratio = float(rows[0]["grad radial rms"]) / float(rows[0]["grad tangential rms"])
+    assert 0.3 < ratio < 3.0  # null: no preferred direction
