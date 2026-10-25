@@ -40,7 +40,7 @@ same transformed test embeddings serve as query and gallery; the train gallery o
 
 Statistics: the per-query value of every metric under every condition is compared
 with the baseline's on the same queries (paired bootstrap over queries within each
-training seed, averaged over seeds, `randomization.paired_bootstrap_intervals`),
+training seed, averaged over seeds, `randomization.bootstrap_seed_mean`),
 with the TOST-style verdict of `randomization.verdict`. The margin is
 `eval.retrieval_margin` (0.5 points of mAP / precision / recall), fixed before any
 retrieval result was computed: the same size as the E1 accuracy margin and well
@@ -465,17 +465,19 @@ def compare(
         draws: dict[str, list[numpy.typing.NDArray[numpy.int64]]] = {}
         for task in TASKS:
             size = group[0].values[task, task_metrics(task)[0], BASELINE].size
-            draws[task] = [
-                rng.integers(0, size, size=(num_bootstrap, size)) for _ in group
-            ]
+            draws[task] = randomization.bootstrap_draws(
+                size, len(group), num_bootstrap, rng
+            )
         for task in TASKS:
             for metric in task_metrics(task):
                 base = [r.values[task, metric, BASELINE] for r in group]
                 for condition in task_conditions(task)[1:]:
                     cond = [r.values[task, metric, condition] for r in group]
                     diffs = [c - b for c, b in zip(cond, base, strict=True)]
-                    lo90, hi90, lo95, hi95 = randomization.paired_bootstrap_intervals(
-                        diffs, draws[task]
+                    ci90, ci95 = randomization.intervals(
+                        randomization.bootstrap_seed_mean(
+                            draws[task], lambda s, idx, d=diffs: d[s][idx].mean(axis=1)
+                        )
                     )
                     b_mean = statistics.fmean(float(b.mean()) for b in base)
                     c_mean = statistics.fmean(float(c.mean()) for c in cond)
@@ -489,11 +491,9 @@ def compare(
                             baseline=b_mean,
                             value=c_mean,
                             difference=c_mean - b_mean,
-                            ci90=(lo90, hi90),
-                            ci95=(lo95, hi95),
-                            verdict=randomization.verdict(
-                                (lo90, hi90), (lo95, hi95), margin
-                            ),
+                            ci90=ci90,
+                            ci95=ci95,
+                            verdict=randomization.verdict(ci90, ci95, margin),
                         )
                     )
     return out

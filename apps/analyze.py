@@ -34,6 +34,12 @@ result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
 section; no other analysis runs and no figures are made.
 
+With `--lowlabel PREFIX` (needs `--config`), the E1 readers are repeated with a
+small labeled bank (`lejepa_norm.eval.lowlabel`): `--lowlabel-run NAME` computes one
+run into a shard under `<runs_dir>/lowlabel/<--lowlabel-shards>` (one SLURM job per
+run, see `slurm/lowlabel.sbatch`); without it the shards of all runs `PREFIX_*` (or
+only those of `--lowlabel-lambda`) are aggregated into `--note`.
+
 The epoch sweep of the redundancy of `z` (see `lejepa_norm.eval.dynamics`) works
 on the per-epoch `stl10_test` dumps written by `apps/embed.py` under
 `radius_dynamics/RUN/epoch_XXXX` and has two steps. `--epoch-unit RUN EPOCH`
@@ -59,6 +65,16 @@ randomization study. `--retrieval-run NAME` computes one run's per-query metrics
 into a shard under `<runs_dir>/radius_usage_retrieval` (one SLURM job per run, GPU
 if available); without it the shards of all runs `PREFIX_*` are aggregated into
 the note (paired bootstrap + TOST per lambda, margin `eval.retrieval_margin`).
+
+With `--frozen-linear PREFIX` (needs `--config`), the radius dependence of the
+frozen linear probe and MLP found by `--randomize-radius` is dissected (exact
+logit decomposition, probe variants, per-image flip diagnostics; see
+`lejepa_norm.eval.frozen_linear`). Per run `PREFIX_*` with both STL-10 dumps one
+unit is computed into a shard under `<runs_dir>/frozen_linear/<--frozen-shards>`
+(`--frozen-list-runs` prints the runs, `--frozen-run NAME` computes one; finished
+shards are skipped, so SLURM jobs can be requeued and run in parallel,
+`slurm/frozen_linear.sbatch`); without either the shards are aggregated per
+lambda into `--note`.
 
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
@@ -94,6 +110,10 @@ Examples:
         --retrieval-run radius_marginal_lam0.05_s0
     python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
         --note radius_usage/retrieval_summary.md
+    python apps/analyze.py --config configs/base.yaml \
+        --frozen-linear radius_marginal --frozen-run radius_marginal_lam0.05_s0
+    python apps/analyze.py --config configs/base.yaml \
+        --frozen-linear radius_marginal --note radius_usage/frozen_linear_summary.md
 """
 
 import argparse
@@ -116,6 +136,8 @@ from lejepa_norm.eval import analysis
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import dynamics
+from lejepa_norm.eval import frozen_linear
+from lejepa_norm.eval import lowlabel
 from lejepa_norm.eval import randomization
 from lejepa_norm.eval import retrieval
 from lejepa_norm.eval import runlog
@@ -165,6 +187,19 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "without it aggregates the shards into --note.",
     )
     mode.add_argument(
+        "--lowlabel",
+        metavar="PREFIX",
+        help="E1 readers with a small labeled bank for runs PREFIX_* (needs "
+        "--config): with --lowlabel-run compute one run's shard, otherwise "
+        "aggregate the shards into --note.",
+    )
+    mode.add_argument(
+        "--frozen-linear",
+        metavar="PREFIX",
+        help="Dissect the radius dependence of frozen probes for runs PREFIX_* "
+        "(needs --config).",
+    )
+    mode.add_argument(
         "--aggregate-controls",
         nargs="+",
         type=pathlib.Path,
@@ -205,6 +240,22 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "(<runs_dir>/radius_usage_retrieval/<run>.npz; GPU if available).",
     )
     parser.add_argument(
+        "--frozen-run",
+        help="With --frozen-linear: compute only this run into its shard; without "
+        "it (and --frozen-list-runs), aggregate the shards into --note.",
+    )
+    parser.add_argument(
+        "--frozen-list-runs",
+        action="store_true",
+        help="With --frozen-linear: print the runs with both dumps and exit.",
+    )
+    parser.add_argument(
+        "--frozen-shards",
+        default="default",
+        help="With --frozen-linear: shard directory name under "
+        "<runs_dir>/frozen_linear.",
+    )
+    parser.add_argument(
         "--power-unit",
         help="With --sigreg-power: compute only this unit into its shard (see "
         "--power-list-units); without it, aggregate the shards into --note.",
@@ -218,6 +269,20 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "--power-shards",
         default="default",
         help="With --sigreg-power: shard directory name under <runs_dir>/sigreg_power.",
+    )
+    parser.add_argument(
+        "--lowlabel-run",
+        help="With --lowlabel: compute only this run into its shard.",
+    )
+    parser.add_argument(
+        "--lowlabel-lambda",
+        type=float,
+        help="With --lowlabel: aggregate only the runs of this lambda.",
+    )
+    parser.add_argument(
+        "--lowlabel-shards",
+        default="default",
+        help="With --lowlabel: shard directory name under <runs_dir>/lowlabel.",
     )
     parser.add_argument(
         "--runs-prefix",
@@ -252,15 +317,22 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--sigreg-power requires --config")
     if args.retrieval is not None and args.config is None:
         parser.error("--retrieval requires --config")
+    if args.lowlabel is not None and args.config is None:
+        parser.error("--lowlabel requires --config")
     if args.note is None and not (
         args.epoch_unit
         or args.power_unit
         or args.power_list_units
         or args.retrieval_run
+        or args.lowlabel_run
+        or args.frozen_run
+        or args.frozen_list_runs
     ):
         parser.error("--note is required")
     if args.randomize_radius is not None and args.config is None:
         parser.error("--randomize-radius requires --config")
+    if args.frozen_linear is not None and args.config is None:
+        parser.error("--frozen-linear requires --config")
     if args.redundancy_controls and args.run_name is None:
         parser.error("--redundancy-controls requires --run-name")
     return args
@@ -672,6 +744,358 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
             "### Figures\n\n" + "\n\n".join(links),
         )
     print(f"wrote {note}")
+    return 0
+
+
+def _lowlabel_figures(
+    runs: list[lowlabel.RunBudgets],
+    comparisons: list[lowlabel.BudgetComparison],
+    lam: float,
+    note: pathlib.Path,
+    chrome: pathlib.Path | None,
+) -> list[str]:
+    """Per reader: accuracy vs labels (retrained protocol) and paired change."""
+    prefix = note.parent / f"{note.stem}"
+    links: list[str] = []
+    for reader in lowlabel.READERS:
+        slug = "".join(ch if ch.isalnum() else "_" for ch in reader.split(" (")[0])
+        acc: dict[str, plotting.Series] = {}
+        for condition in randomization.CONDITIONS:
+            x, y, sd = lowlabel.accuracy_curve(
+                runs, lam, reader, randomization.RETRAIN, condition
+            )
+            acc[condition] = plotting.Series(
+                x=x,
+                y=[100 * v for v in y],
+                low=[100 * (v - s) for v, s in zip(y, sd, strict=True)],
+                high=[100 * (v + s) for v, s in zip(y, sd, strict=True)],
+            )
+        fig = plotting.line_plot(
+            acc,
+            f"Accuracy vs labels, {reader}, lambda={lam:g}",
+            "labeled images (log scale)",
+            "test accuracy (%)",
+            log_x=True,
+        )
+        out = plotting.export_png(fig, f"{prefix}_accuracy_{slug}.png", chrome)
+        links.append(reporting.image_link(out, note, f"accuracy vs labels, {reader}"))
+        change: dict[str, plotting.Series] = {}
+        for protocol in randomization.PROTOCOLS:
+            for condition in randomization.CONDITIONS[1:]:
+                if (
+                    protocol == randomization.FROZEN
+                    and condition == randomization.CONSTANT
+                ):
+                    continue  # collapses to chance: a distribution-shift artifact
+                rows = [
+                    b
+                    for b in comparisons
+                    if b.comparison.lam == lam
+                    and b.comparison.reader == reader
+                    and b.comparison.protocol == protocol
+                    and b.comparison.condition == condition
+                ]
+                change[f"{condition} ({protocol})"] = plotting.Series(
+                    x=[b.num_labels for b in rows],
+                    y=[100 * b.comparison.difference for b in rows],
+                    low=[100 * b.comparison.ci95[0] for b in rows],
+                    high=[100 * b.comparison.ci95[1] for b in rows],
+                )
+        fig = plotting.line_plot(
+            change,
+            f"Accuracy change vs baseline, {reader}, lambda={lam:g}",
+            "labeled images (log scale)",
+            "accuracy change (points)",
+            reference=0.0,
+            log_x=True,
+        )
+        out = plotting.export_png(fig, f"{prefix}_change_{slug}.png", chrome)
+        links.append(reporting.image_link(out, note, f"accuracy change, {reader}"))
+    return links
+
+
+def _run_lowlabel(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    shard_dir = locations.runs_dir / "lowlabel" / args.lowlabel_shards
+    if args.lowlabel_run is not None:
+        name = args.lowlabel_run
+        bank = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, name, dumps.STL10_TRAIN)
+        )
+        query = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, name, dumps.STL10_TEST)
+        )
+        if bank is None or query is None:
+            raise FileNotFoundError(f"missing stl10_train/stl10_test dump for {name}")
+        results = lowlabel.evaluate_run(
+            randomization.center_embeddings(bank.z),
+            bank.label,
+            randomization.center_embeddings(query.z),
+            query.label,
+            k=cfg.eval.knn_k,
+            num_repeats=cfg.eval.num_randomizations,
+            cv_folds=cfg.eval.cv_folds,
+            seed=cfg.seed,
+            num_subsets=cfg.eval.lowlabel_subsets,
+            log=lambda message: print(f"{name}: {message}", file=sys.stderr),
+        )
+        lowlabel.save_run(shard_dir / f"{name}.npz", results)
+        print(f"wrote {shard_dir / f'{name}.npz'}")
+        return 0
+    loaded: list[lowlabel.RunBudgets] = []
+    for run in sweep.load_runs(locations.runs_dir, args.lowlabel):
+        if args.lowlabel_lambda is not None and run.lam != args.lowlabel_lambda:
+            continue
+        shard = shard_dir / f"{run.name}.npz"
+        if not shard.exists():
+            raise FileNotFoundError(f"missing shard {shard}")
+        loaded.append(
+            lowlabel.RunBudgets(run.name, run.lam, run.seed, lowlabel.load_run(shard))
+        )
+    if not loaded:
+        print(f"no run named {args.lowlabel}_* selected", file=sys.stderr)
+        return 1
+    margin = cfg.eval.equivalence_margin
+    comparisons = lowlabel.compare(
+        loaded, margin, cfg.eval.num_bootstrap, numpy.random.default_rng(cfg.seed)
+    )
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.lowlabel_comparison",
+        "### Paired accuracy change vs the baseline, per lambda and label budget\n\n"
+        "z-space, center views; labeled bank = a class-balanced random subset of "
+        "STL-10 train, test set = STL-10 test; the same transformation is applied "
+        "to bank and test set independently. Differences are in accuracy points "
+        "(condition minus baseline on the same test images and the same subsets), "
+        "averaged over training seeds and subsets. `90% CI, test images`: paired "
+        f"bootstrap ({cfg.eval.num_bootstrap} replicates, test images resampled "
+        "within each seed), conditional on the drawn subsets. `subset SE`: standard "
+        "error of the mean paired difference over subsets. Verdicts, with the "
+        f"equivalence margin set to ±{100 * margin:g} points before looking at "
+        "results: `equivalent` if the 90% interval (TOST at 5%) lies inside the "
+        "margin, `different` if not equivalent and the 95% interval excludes 0, "
+        "otherwise `inconclusive`; `(with subsets)` adds the subset SE in "
+        "quadrature to the bootstrap SE (normal approximation).\n\n"
+        + reporting.markdown_table(lowlabel.comparison_rows(comparisons)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.lowlabel_summary",
+        "### Compact view\n\nAccuracy change in points, `difference [90% CI "
+        "including subset noise] verdict(test images)/verdict(with subsets)` with "
+        "E = equivalent (margin ±"
+        f"{100 * margin:g} points), D = different, I = inconclusive. The frozen "
+        "constant-radius cell (chance level, a distribution-shift artifact) is "
+        "omitted.\n\n" + reporting.markdown_table(lowlabel.summary_rows(comparisons)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.lowlabel_accuracy",
+        "### Accuracy per label budget\n\n"
+        + reporting.markdown_table(lowlabel.accuracy_rows(loaded)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.lowlabel_hyper",
+        "### Hyperparameters selected by cross-validation inside each subset\n\n"
+        "Linear probe: inverse regularization C; MLP: weight decay.\n\n"
+        + reporting.markdown_table(lowlabel.hyper_rows(loaded)),
+    )
+    if not args.no_figures:
+        links: list[str] = []
+        for lam in sorted({r.lam for r in loaded}):
+            links += _lowlabel_figures(
+                loaded, comparisons, lam, note, locations.kaleido_chrome
+            )
+        reporting.update_section(
+            note,
+            "analyze.lowlabel_figures",
+            "### Figures\n\nPer reader and lambda: accuracy vs number of labeled "
+            "images (retrained protocol; mean over seeds and subsets, bars = "
+            "standard deviation over subsets), then the paired accuracy change vs "
+            "the baseline (bars = 95% paired bootstrap interval over test images; "
+            "the frozen constant-radius cell is omitted, it is at chance).\n\n"
+            + "\n\n".join(links),
+        )
+    print(f"wrote {note}")
+    return 0
+
+
+_FROZEN_CURVE_PROBES = (
+    frozen_linear.RAW,
+    frozen_linear.AUG,
+    frozen_linear.MLP_RAW,
+    frozen_linear.MLP_AUG,
+)
+
+
+def _frozen_runs_with_dumps(
+    args: argparse.Namespace, locations: paths.Paths
+) -> list[sweep.Run]:
+    """Runs `PREFIX_*` that have both the `stl10_train` and `stl10_test` dumps."""
+    return [
+        run
+        for run in sweep.load_runs(locations.runs_dir, args.frozen_linear)
+        if all(
+            any(dumps.set_dir(locations.embed_dir, run.name, name).glob("*.npz"))
+            for name in (dumps.STL10_TRAIN, dumps.STL10_TEST)
+        )
+    ]
+
+
+def _frozen_figures(
+    points: list[frozen_linear.CurvePoint],
+    note: pathlib.Path,
+    chrome: pathlib.Path | None,
+) -> list[str]:
+    """Accuracy against a common constant radius, one figure per lambda."""
+    prefix = note.parent / note.stem
+    links: list[str] = []
+    for lam in sorted({p.lam for p in points}):
+        series = {
+            probe: plotting.Series(
+                x=[p.exponent for p in points if p.lam == lam and p.probe == probe],
+                y=[p.accuracy for p in points if p.lam == lam and p.probe == probe],
+            )
+            for probe in _FROZEN_CURVE_PROBES
+        }
+        fig = plotting.line_plot(
+            series,
+            f"Accuracy with the same radius for every test image, lambda = {lam:g}",
+            "log2(radius / median test radius)",
+            "test accuracy",
+        )
+        out = plotting.export_png(fig, f"{prefix}_curve_lam{lam:g}.png", chrome)
+        links.append(reporting.image_link(out, note, f"constant-radius curve {lam:g}"))
+    return links
+
+
+def _write_frozen_note(
+    args: argparse.Namespace,
+    cfg: config.ExperimentConfig,
+    results: list[frozen_linear.RunAnalysis],
+    locations: paths.Paths,
+) -> None:
+    """Aggregates the per-run shards into the note (CPU only)."""
+    note = locations.notes_dir / args.note
+    margin, boots = cfg.eval.equivalence_margin, cfg.eval.num_bootstrap
+    rng = numpy.random.default_rng(cfg.seed)
+    ci_text = (
+        "Differences are in accuracy points on the same test images, averaged over "
+        f"training seeds; intervals are paired bootstrap percentile intervals "
+        f"({boots} replicates, test images resampled within each seed). Verdict with "
+        f"the margin fixed at ±{100 * margin:g} points before looking at results: "
+        "`equivalent` if the 90% interval lies inside the margin, `different` if not "
+        "equivalent and the 95% interval excludes 0, else `inconclusive`. "
+    )
+    reporting.update_section(
+        note,
+        "analyze.frozen_change",
+        "### Frozen accuracy change under each radius condition\n\n"
+        + ci_text
+        + "Each probe is fitted on the clean bank and evaluated frozen; the change "
+        "is against its own baseline. Radius-free probes must be exactly 0.\n\n"
+        + reporting.markdown_table(
+            frozen_linear.change_rows(results, margin, boots, rng)
+        ),
+    )
+    reporting.update_section(
+        note,
+        "analyze.frozen_cost",
+        "### Clean accuracy of the variants against the E1 probe\n\n"
+        + ci_text
+        + "\n\n"
+        + reporting.markdown_table(
+            frozen_linear.cost_rows(results, margin, boots, rng)
+        ),
+    )
+    reporting.update_section(
+        note,
+        "analyze.frozen_flips",
+        "### Flips of the frozen E1 probes under the radius permutation\n\n"
+        "Per test image and shuffle repeat; points = percent of (image, repeat) "
+        "pairs; value [95% CI]. `correct -> wrong` and `wrong -> correct` add up to "
+        "the net accuracy change.\n\n"
+        + reporting.markdown_table(frozen_linear.flip_rows(results, boots, rng)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.frozen_correlations",
+        "### What predicts the flips (Spearman, per image, mean over seeds)\n\n"
+        "Per-image flip rate (over the shuffle repeats) and accuracy loss against "
+        "candidate predictors; value [95% bootstrap CI over test images].\n\n"
+        + reporting.markdown_table(frozen_linear.correlation_rows(results, boots, rng)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.frozen_grid",
+        "### Flip rate (percent) by baseline margin and |log radius ratio|\n\n"
+        + reporting.markdown_table(frozen_linear.grid_rows(results)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.frozen_decomposition",
+        "### Exact logit decomposition of the E1 linear probe (z, test set)\n\n"
+        + reporting.markdown_table(frozen_linear.decomposition_rows(results)),
+    )
+    points = frozen_linear.curve_points(results)
+    reporting.update_section(
+        note,
+        "analyze.frozen_curves",
+        "### Accuracy when every test image has the same radius\n\n"
+        + reporting.markdown_table(
+            frozen_linear.curve_rows(points, _FROZEN_CURVE_PROBES)
+        ),
+    )
+    if not args.no_figures:
+        links = _frozen_figures(points, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note, "analyze.frozen_figures", "### Figures\n\n" + "\n\n".join(links)
+        )
+    print(f"wrote {note}")
+
+
+def _run_frozen_linear(args: argparse.Namespace) -> int:
+    """Frozen-probe dissection: list runs, compute one run's shard, or aggregate."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stderr
+    )
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    shard_dir = locations.runs_dir / "frozen_linear" / args.frozen_shards
+    runs = _frozen_runs_with_dumps(args, locations)
+    if args.frozen_list_runs:
+        print("\n".join(run.name for run in runs), flush=True)
+        return 0
+    if args.frozen_run is not None:
+        target = [run for run in runs if run.name == args.frozen_run]
+        if not target:
+            raise FileNotFoundError(f"run {args.frozen_run} lacks a dump or the prefix")
+        run = target[0]
+        shard = shard_dir / f"{run.name}.npz"
+        if shard.exists():
+            logger.info("%s: shard exists, skipping", run.name)
+            return 0
+        bank = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, run.name, dumps.STL10_TRAIN)
+        )
+        query = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, run.name, dumps.STL10_TEST)
+        )
+        assert bank is not None and query is not None
+        result = frozen_linear.analyze_shards(
+            run.name, run.lam, run.seed, bank, query, cfg.eval, cfg.seed
+        )
+        frozen_linear.save_run(shard, result)
+        logger.info("%s: wrote %s", run.name, shard)
+        return 0
+    missing = [run.name for run in runs if not (shard_dir / f"{run.name}.npz").exists()]
+    if missing or not runs:
+        raise FileNotFoundError(f"missing shards in {shard_dir}: {', '.join(missing)}")
+    results = [frozen_linear.load_run(shard_dir / f"{run.name}.npz") for run in runs]
+    _write_frozen_note(args, cfg, results, locations)
     return 0
 
 
@@ -1201,6 +1625,10 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_randomize_radius(args)
     if args.retrieval is not None:
         return _run_retrieval(args)
+    if args.lowlabel is not None:
+        return _run_lowlabel(args)
+    if args.frozen_linear is not None:
+        return _run_frozen_linear(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
     if args.epoch_unit is not None:

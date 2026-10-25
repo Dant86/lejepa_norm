@@ -58,3 +58,15 @@ def test_figures_render_to_png(tmp_path: pathlib.Path) -> None:
         plotting.radius_histogram(r, 256, "radius"), tmp_path / "hist.png", chrome
     )
     assert out.read_bytes().startswith(b"\x89PNG")
+
+
+def _xaxis(fig: plotting.go.Figure) -> dict[str, typing.Any]:
+    layout = typing.cast(dict[str, typing.Any], fig.to_dict())["layout"]
+    return typing.cast(dict[str, typing.Any], layout["xaxis"])
+
+
+def test_line_plot_can_use_a_logarithmic_x_axis() -> None:
+    series = {"a": plotting.Series(x=[50, 500, 5000], y=[1.0, 2.0, 3.0])}
+    log = _xaxis(plotting.line_plot(series, "t", "x", "y", log_x=True))
+    assert log["type"] == "log" and log["tickvals"] == [50.0, 500.0, 5000.0]
+    assert "type" not in _xaxis(plotting.line_plot(series, "t", "x", "y"))
