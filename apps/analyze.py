@@ -608,7 +608,10 @@ def _run_retrieval(args: argparse.Namespace) -> int:
         logger.info("wrote %s", retrieval.save_result(shard_dir, result))
         return 0
     results = [
-        retrieval.load_result(shard_dir / f"{r.name}.npz")
+        # lambda and training seed come from the run's resolved config.
+        dataclasses.replace(
+            retrieval.load_result(shard_dir / f"{r.name}.npz"), lam=r.lam, seed=r.seed
+        )
         for r in runs
         if (shard_dir / f"{r.name}.npz").exists()
     ]
