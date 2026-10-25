@@ -154,6 +154,9 @@ def test_shard_round_trip_and_aggregation(tmp_path: pathlib.Path) -> None:
         if c.verdict_with_subsets == randomization.EQUIVALENT:
             assert c.comparison.verdict == randomization.EQUIVALENT
     assert lowlabel.comparison_rows(comparisons)[0]["subsets"] == 3
+    summary = lowlabel.summary_rows(comparisons)
+    assert len(summary) == 2 * 5  # readers x (protocol, condition) without frozen const
+    assert all(len(row) == 3 + 3 for row in summary)  # keys + one column per budget
 
 
 def _load_app() -> types.ModuleType:
@@ -225,7 +228,7 @@ def test_analyze_lowlabel_mode_computes_shards_then_aggregates_per_lambda(
     note = ["--note", "idea/lowlabel_lam0.05.md", "--no-figures"]
     assert app.main([*base, *note, "--lowlabel-lambda", "0.05"]) == 0
     text = (notes / "idea" / "lowlabel_lam0.05.md").read_text()
-    for name in ("comparison", "accuracy", "hyper"):
+    for name in ("comparison", "summary", "accuracy", "hyper"):
         assert f"BEGIN GENERATED: analyze.lowlabel_{name}" in text
     lines = text.splitlines()
     verdicts = [

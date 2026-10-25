@@ -467,6 +467,7 @@ class BudgetComparison:
             over subsets, combined over seeds.
         subset_sd_baseline: Standard deviation over subsets of the baseline
             accuracy, mean over seeds.
+        ci90_with_subsets: 90% interval with the subset SE added in quadrature.
         verdict_with_subsets: Verdict with the subset standard error added to the
             bootstrap one (normal approximation).
     """
@@ -478,6 +479,7 @@ class BudgetComparison:
     subset_se: float
     subset_sd_baseline: float
     verdict_with_subsets: str
+    ci90_with_subsets: tuple[float, float]
 
 
 def _sd(values: collections.abc.Sequence[float]) -> float:
@@ -549,6 +551,7 @@ def compare(
                     subset_se=subset_se,
                     subset_sd_baseline=baseline_sd,
                     verdict_with_subsets=randomization.verdict(ci90, ci95, margin),
+                    ci90_with_subsets=ci90,
                 )
             )
     return out
@@ -662,3 +665,48 @@ def accuracy_curve(
         mean.append(statistics.fmean(statistics.fmean(a) for a in accs))
         sd.append(statistics.fmean(_sd(a) for a in accs))
     return labels, mean, sd
+
+
+_LETTER = {
+    randomization.EQUIVALENT: "E",
+    randomization.DIFFERENT: "D",
+    randomization.INCONCLUSIVE: "I",
+}
+
+
+def summary_rows(comparisons: list[BudgetComparison]) -> list[Row]:
+    """Compact table, one row per reader/protocol/condition.
+
+    One column per lambda and budget, each cell `difference [90% CI with subsets]
+    test-image verdict/with-subset verdict` (E equivalent, D different, I
+    inconclusive; points).
+
+    The frozen constant-radius condition (a distribution-shift artifact: chance
+    level) is left out.
+    """
+    columns = sorted({(b.comparison.lam, b.num_labels) for b in comparisons})
+    rows: dict[tuple[str, str, str], Row] = {}
+    for b in comparisons:
+        c = b.comparison
+        if c.protocol == randomization.FROZEN and c.condition == randomization.CONSTANT:
+            continue
+        row = rows.setdefault(
+            (c.protocol, c.reader, c.condition),
+            {"protocol": c.protocol, "reader": c.reader, "condition": c.condition},
+        )
+        lo, hi = b.ci90_with_subsets
+        row[f"lambda {c.lam:g}, {b.num_labels} labels"] = (
+            f"{100 * c.difference:+.2f} [{100 * lo:+.2f}, {100 * hi:+.2f}] "
+            f"{_LETTER[c.verdict]}/{_LETTER[b.verdict_with_subsets]}"
+        )
+    order = {name: i for i, name in enumerate(randomization.CONDITIONS)}
+    ordered = sorted(
+        rows.values(),
+        key=lambda r: (
+            randomization.PROTOCOLS.index(str(r["protocol"])),
+            READERS.index(str(r["reader"])),
+            order[str(r["condition"])],
+        ),
+    )
+    names = [f"lambda {lam:g}, {n} labels" for lam, n in columns]
+    return [{**r, **{n: r.get(n, "") for n in names}} for r in ordered]

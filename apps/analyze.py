@@ -782,6 +782,16 @@ def _run_lowlabel(args: argparse.Namespace) -> int:
     )
     reporting.update_section(
         note,
+        "analyze.lowlabel_summary",
+        "### Compact view\n\nAccuracy change in points, `difference [90% CI "
+        "including subset noise] verdict(test images)/verdict(with subsets)` with "
+        "E = equivalent (margin ±"
+        f"{100 * margin:g} points), D = different, I = inconclusive. The frozen "
+        "constant-radius cell (chance level, a distribution-shift artifact) is "
+        "omitted.\n\n" + reporting.markdown_table(lowlabel.summary_rows(comparisons)),
+    )
+    reporting.update_section(
+        note,
         "analyze.lowlabel_accuracy",
         "### Accuracy per label budget\n\n"
         + reporting.markdown_table(lowlabel.accuracy_rows(loaded)),
