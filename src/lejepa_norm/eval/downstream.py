@@ -135,6 +135,8 @@ class LinearProbe:
         num_classes: int,
         c: float = 1.0,
         max_iter: int = 1000,
+        center: bool = True,
+        fit_intercept: bool = True,
     ) -> None:
         """Fits the probe.
 
@@ -144,12 +146,19 @@ class LinearProbe:
             num_classes: Number of classes; columns of `predict_proba`.
             c: Inverse L2 regularization strength.
             max_iter: L-BFGS iterations.
+            center: Subtract the training mean of every feature (the features
+                are always divided by their training standard deviation).
+            fit_intercept: Fit a class intercept. With neither centering nor an
+                intercept the logits are linear homogeneous in `x`, so the
+                predicted class is invariant to a rescaling of `x`.
         """
         arr = numpy.asarray(x, dtype=numpy.float64)
-        self._mean = arr.mean(axis=0)
+        self._mean = arr.mean(axis=0) if center else numpy.zeros(arr.shape[1])
         self._std = numpy.where(arr.std(axis=0) > 0, arr.std(axis=0), 1.0)
         self._num_classes = num_classes
-        self._model = sklearn.linear_model.LogisticRegression(C=c, max_iter=max_iter)
+        self._model = sklearn.linear_model.LogisticRegression(
+            C=c, max_iter=max_iter, fit_intercept=fit_intercept
+        )
         self._model.fit(
             (arr - self._mean) / self._std, numpy.asarray(y, dtype=numpy.int64)
         )
@@ -161,6 +170,21 @@ class LinearProbe:
         out = numpy.zeros((arr.shape[0], self._num_classes), dtype=numpy.float64)
         out[:, seen] = numpy.asarray(self._model.predict_proba(arr))
         return out
+
+    def affine(self) -> tuple[FloatArray, FloatArray]:
+        """The logits as an affine map of the raw features: `x @ W.T + b`.
+
+        Returns:
+            `(W, b)` of shapes `(C, d)` and `(C,)` over the classes seen in
+            training, with the standardization folded in (the logits equal
+            `log` of `predict_proba` up to a per-row constant).
+        """
+        coef = numpy.asarray(self._model.coef_, dtype=numpy.float64)
+        weights = coef / self._std
+        bias = numpy.asarray(self._model.intercept_, dtype=numpy.float64) - (
+            weights @ self._mean
+        )
+        return weights, bias
 
     def predict(self, x: numpy.typing.ArrayLike) -> IntArray:
         """Most probable class, `(N,)`."""
@@ -214,8 +238,14 @@ class MlpProbe:
                 (arr - self._mean) / self._std, numpy.asarray(y, dtype=numpy.int64)
             )
 
-    def predict(self, x: numpy.typing.ArrayLike) -> IntArray:
-        """Most probable class, `(N,)` (unseen classes are never predicted)."""
+    def predict_proba(self, x: numpy.typing.ArrayLike) -> FloatArray:
+        """Softmax probabilities, `(N, num_classes)` (zero for unseen classes)."""
         arr = (numpy.asarray(x, dtype=numpy.float64) - self._mean) / self._std
         seen = numpy.asarray(self._model.classes_, dtype=numpy.int64)
-        return seen[numpy.argmax(self._model.predict_proba(arr), axis=1)]
+        out = numpy.zeros((arr.shape[0], self._num_classes), dtype=numpy.float64)
+        out[:, seen] = numpy.asarray(self._model.predict_proba(arr))
+        return out
+
+    def predict(self, x: numpy.typing.ArrayLike) -> IntArray:
+        """Most probable class, `(N,)` (unseen classes are never predicted)."""
+        return numpy.argmax(self.predict_proba(x), axis=1).astype(numpy.int64)
