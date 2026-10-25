@@ -236,7 +236,7 @@ def select_weight_decay(
     return weight_decays[int(numpy.argmax(scores))]
 
 
-def _make_fit(
+def make_fit(
     reader: str,
     labels: IntArray,
     k: int,
@@ -362,7 +362,7 @@ def evaluate(
         )
 
     for reader in readers:
-        fit = _make_fit(reader, by, k, num_classes, seed, weight_decay)
+        fit = make_fit(reader, by, k, num_classes, seed, weight_decay)
         clean = fit(bank)
         for protocol in PROTOCOLS:
             store(reader, protocol, BASELINE, [clean(query)])

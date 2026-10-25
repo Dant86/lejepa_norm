@@ -60,6 +60,41 @@ def save_shard(path: str | os.PathLike[str], shard: EmbeddingShard) -> None:
     os.replace(partial, dest)
 
 
+@dataclasses.dataclass
+class CenterShard:
+    """z of the center view only (the memory-light view of an `EmbeddingShard`).
+
+    Attributes:
+        z: Center-view projector outputs, float32 `(N, d_z)`.
+        image_id: int64 `(N,)`.
+        label: int64 `(N,)`.
+        corruption: str `(N,)`; empty string for clean images.
+        severity: int8 `(N,)`.
+    """
+
+    z: numpy.typing.NDArray[numpy.float32]
+    image_id: numpy.typing.NDArray[numpy.int64]
+    label: numpy.typing.NDArray[numpy.int64]
+    corruption: numpy.typing.NDArray[numpy.str_]
+    severity: numpy.typing.NDArray[numpy.int8]
+
+
+def load_center_shard(path: str | os.PathLike[str]) -> CenterShard:
+    """Reads only the center-view `z` and the metadata of a shard.
+
+    `.npz` members are read lazily, so the backbone feature `h` (about two thirds
+    of the file) is never loaded and only the center slice of `z` is kept.
+    """
+    with numpy.load(path, allow_pickle=False) as arrays:
+        return CenterShard(
+            z=numpy.ascontiguousarray(arrays["z"][:, CENTER_VIEW]),
+            image_id=arrays["image_id"],
+            label=arrays["label"],
+            corruption=arrays["corruption"],
+            severity=arrays["severity"],
+        )
+
+
 def load_shard(path: str | os.PathLike[str]) -> EmbeddingShard:
     """Reads a shard written by `save_shard`, validating shapes."""
     with numpy.load(path, allow_pickle=False) as arrays:

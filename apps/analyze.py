@@ -36,6 +36,15 @@ runs missing a dump are listed in the note, not dropped silently. The note gets
 paired-bootstrap differences against the unmodified baseline with an equivalence
 verdict (margin `eval.equivalence_margin`), accuracy tables and figures.
 
+With `--shift-unit` (per-run mode, needs `--config`; no `--note`), one run's
+use-under-shift outcomes are computed into `<runs_dir>/<run>/shift_cells.npz`
+(corrupted STL-10-C test images, readers fitted on the clean bank, radius
+conditions applied to the test embeddings) and `shift_ood.npz` (STL-10 test vs DTD
+and SVHN scores); z only, center views, memory-light. With `--shift PREFIX` (needs
+`--config`) the units of the runs `PREFIX_*` are aggregated per lambda (paired
+bootstrap over images, mean over seeds) into `<note stem>_lam<lambda>.md` next to
+`--note` (see `lejepa_norm.eval.usage_shift`, `shift`, `ood_radius`).
+
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
 `LEJEPA_NORM_RUNS_DIR/<run-name>/`), then writes markdown tables into generated
@@ -58,6 +67,10 @@ Examples:
     python apps/analyze.py --config configs/base.yaml \
         --randomize-radius radius_marginal \
         --note radius_randomization/radius_randomization.md
+    python apps/analyze.py --config configs/base.yaml \
+        --run-name radius_marginal_lam0.05_s0 --shift-unit
+    python apps/analyze.py --config configs/base.yaml --shift radius_marginal \
+        --note radius_usage/shift.md
 """
 
 import argparse
@@ -83,6 +96,7 @@ from lejepa_norm.eval import randomization
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
 from lejepa_norm.eval import sweep
+from lejepa_norm.eval import usage_shift
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +131,12 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "--randomize-radius",
         metavar="PREFIX",
         help="k-NN with randomized radius for runs PREFIX_* (needs --config).",
+    )
+    mode.add_argument(
+        "--shift",
+        metavar="PREFIX",
+        help="Aggregate the --shift-unit outputs of runs PREFIX_* per lambda "
+        "(needs --config).",
     )
     mode.add_argument(
         "--aggregate-controls",
@@ -164,12 +184,29 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Per-run mode only: run just the controls of the redundancy result.",
     )
+    parser.add_argument(
+        "--shift-unit",
+        action="store_true",
+        help="Per-run mode only: compute the use-under-shift outcomes of the run.",
+    )
+    parser.add_argument(
+        "--shift-part",
+        choices=usage_shift.PARTS,
+        default="both",
+        help="With --shift-unit: which part to compute.",
+    )
     args = parser.parse_args(argv)
+    if args.shift is not None and args.config is None:
+        parser.error("--shift requires --config")
+    if args.shift_unit and args.run_name is None:
+        parser.error("--shift-unit requires --run-name")
     if args.run_name is not None and args.config is None:
         parser.error("--run-name requires --config")
     if args.sigreg_power and args.config is None:
         parser.error("--sigreg-power requires --config")
-    if args.note is None and not (args.power_unit or args.power_list_units):
+    if args.note is None and not (
+        args.power_unit or args.power_list_units or args.shift_unit
+    ):
         parser.error("--note is required")
     if args.randomize_radius is not None and args.config is None:
         parser.error("--randomize-radius requires --config")
@@ -509,6 +546,30 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stderr(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _run_shift_unit(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    for out in usage_shift.run_unit(
+        cfg, locations, args.run_name, args.shift_part, _stderr
+    ):
+        print(f"wrote {out}")
+    return 0
+
+
+def _run_shift(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    for out in usage_shift.write_notes(
+        cfg, locations, args.shift, args.note, not args.no_figures
+    ):
+        print(f"wrote {out}")
+    return 0
+
+
 def _run_aggregate_controls(args: argparse.Namespace) -> int:
     locations = paths.load_paths()
     by_lambda: dict[float, list[list[dict[str, str]]]] = {}
@@ -786,6 +847,10 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_sweep(args)
     if args.randomize_radius is not None:
         return _run_randomize_radius(args)
+    if args.shift is not None:
+        return _run_shift(args)
+    if args.shift_unit:
+        return _run_shift_unit(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
     if args.sigreg_power:
