@@ -14,6 +14,21 @@ With `--aggregate-controls NOTE...` the generated controls sections of several
 per-run notes are read back and aggregated over seeds per lambda (mean ± std);
 nothing is recomputed.
 
+With `--transfer` (per-run mode), only the clean-to-corrupted transfer of the
+radius map (z only; see `lejepa_norm.eval.transfer`) is run on the `stl10_test` and
+`stl10c` dumps and written to its own section, with two PNGs (raw shift and
+residual per severity) unless `--no-figures`. `--aggregate-transfer NOTE...`
+aggregates such sections over seeds per lambda. h is not analyzed in these modes.
+
+With `--sigreg-power` (needs `--config`), the synthetic SIGReg power study of
+`lejepa_norm.eval.sigreg_power` (sizes from the config) is split into independent
+units (one per radial profile and kappa, plus one per real run `PREFIX_*` given by
+`--runs-prefix`; projector output z only). `--power-list-units` prints them,
+`--power-unit NAME` computes one into a shard under `<runs_dir>/sigreg_power` (on
+the GPU if there is one; finished shards are skipped, so jobs can be requeued), and
+without either the shards are aggregated into the note with power and gradient
+tables and figures (`slurm/sigreg_power.sbatch` fans the units out over SLURM).
+
 With `--redundancy-controls` (per-run mode), only the controls of the redundancy
 result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
@@ -48,6 +63,10 @@ Examples:
         --note radius-conditional/variant_a.md --set eval.num_bootstrap=200
     python apps/analyze.py --config configs/base.yaml --run-name a_l0.05_s0 \
         --note radius-conditional/variant_a_controls.md --redundancy-controls
+    python apps/analyze.py --config configs/base.yaml --run-name a_l0.05_s0 \
+        --note radius_transfer/a_l0.05_s0.md --transfer
+    python apps/analyze.py --aggregate-transfer radius_transfer/a_l0.05_s0.md \
+        radius_transfer/a_l0.05_s1.md --note radius_transfer/summary.md
     python apps/analyze.py --aggregate-controls a_l0.05_s0_controls.md \
         a_l0.05_s1_controls.md --note radius-conditional/controls_summary.md
     python apps/analyze.py --sweep radius_marginal \
@@ -56,6 +75,10 @@ Examples:
         --epoch-unit a_l0.05_s0 10
     python apps/analyze.py --config configs/base.yaml --set eval.num_permutations=20 \
         --epoch-sweep a_l0.05_s0 a_l0.05_s1 --note radius_dynamics/sweep.md
+    python apps/analyze.py --sigreg-power --config configs/base.yaml \
+        --runs-prefix radius_marginal --power-unit null
+    python apps/analyze.py --sigreg-power --config configs/base.yaml \
+        --runs-prefix radius_marginal --note sigreg_power/power.md
     python apps/analyze.py --config configs/base.yaml \
         --randomize-radius radius_marginal \
         --note radius_randomization/radius_randomization.md
@@ -63,12 +86,15 @@ Examples:
 
 import argparse
 import collections.abc
+import dataclasses
+import logging
 import math
 import pathlib
 import sys
 import typing
 
 import numpy
+import torch
 
 from lejepa_norm import config
 from lejepa_norm import paths
@@ -80,7 +106,11 @@ from lejepa_norm.eval import dumps
 from lejepa_norm.eval import dynamics
 from lejepa_norm.eval import randomization
 from lejepa_norm.eval import runlog
+from lejepa_norm.eval import sigreg_power
 from lejepa_norm.eval import sweep
+from lejepa_norm.eval import transfer
+
+logger = logging.getLogger(__name__)
 
 _TITLES = {
     analysis.MARGINAL: "Marginal radius (STL-10 test)",
@@ -136,6 +166,38 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Compute and store the shard of one (run, epoch) of the epoch sweep "
         "(needs --config; writes no note).",
     )
+    mode.add_argument(
+        "--aggregate-transfer",
+        nargs="+",
+        type=pathlib.Path,
+        metavar="TRANSFER_NOTE",
+        help="Aggregate per-run transfer notes (relative to the notes dir) over "
+        "seeds, per lambda, into --note.",
+    )
+    mode.add_argument(
+        "--sigreg-power",
+        action="store_true",
+        help="Synthetic SIGReg power study (needs --config).",
+    )
+    parser.add_argument(
+        "--power-unit",
+        help="With --sigreg-power: compute only this unit into its shard (see "
+        "--power-list-units); without it, aggregate the shards into --note.",
+    )
+    parser.add_argument(
+        "--power-list-units",
+        action="store_true",
+        help="With --sigreg-power: print the unit names, one per line, and exit.",
+    )
+    parser.add_argument(
+        "--power-shards",
+        default="default",
+        help="With --sigreg-power: shard directory name under <runs_dir>/sigreg_power.",
+    )
+    parser.add_argument(
+        "--runs-prefix",
+        help="With --sigreg-power: also analyze the real z of runs PREFIX_*.",
+    )
     parser.add_argument(
         "--note",
         type=pathlib.Path,
@@ -150,12 +212,23 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Per-run mode only: run just the controls of the redundancy result.",
     )
+    parser.add_argument(
+        "--transfer",
+        action="store_true",
+        help="Per-run mode only: run just the clean-to-corrupted radius transfer.",
+    )
     args = parser.parse_args(argv)
     needs_config = (args.run_name, args.epoch_sweep, args.epoch_unit)
     if any(m is not None for m in needs_config) and args.config is None:
         parser.error("--run-name, --epoch-sweep and --epoch-unit require --config")
-    if args.epoch_unit is None and args.note is None:
-        parser.error("--note is required (except with --epoch-unit)")
+    if args.transfer and args.run_name is None:
+        parser.error("--transfer requires --run-name")
+    if args.sigreg_power and args.config is None:
+        parser.error("--sigreg-power requires --config")
+    if args.note is None and not (
+        args.epoch_unit or args.power_unit or args.power_list_units
+    ):
+        parser.error("--note is required")
     if args.randomize_radius is not None and args.config is None:
         parser.error("--randomize-radius requires --config")
     if args.redundancy_controls and args.run_name is None:
@@ -352,6 +425,84 @@ def _run_redundancy_controls(args: argparse.Namespace) -> int:
     return 0
 
 
+def _transfer_figures(
+    result: transfer.TransferResult, note: pathlib.Path, chrome: pathlib.Path | None
+) -> list[str]:
+    prefix = note.parent / note.stem
+    links: list[str] = []
+    panels = (
+        ("raw_shift", "Raw paired radius shift (z)", "mean delta rho"),
+        (
+            "residual_held",
+            "Residual after the clean-fitted map (z, held-out twins)",
+            "mean (observed - predicted) rho",
+        ),
+    )
+    for attribute, title, y_title in panels:
+        series: dict[str, plotting.Series] = {}
+        for corruption in dict.fromkeys(c.corruption for c in result.cells):
+            cells = [c for c in result.cells if c.corruption == corruption]
+            est = [getattr(c, attribute) for c in cells]
+            series[corruption] = plotting.Series(
+                x=[c.severity for c in cells],
+                y=[e.value for e in est],
+                low=[e.low for e in est],
+                high=[e.high for e in est],
+            )
+        out = plotting.export_png(
+            plotting.line_plot(series, title, "severity", y_title, reference=0.0),
+            f"{prefix}_transfer_{attribute}.png",
+            chrome,
+        )
+        links.append(reporting.image_link(out, note, title))
+    return links
+
+
+def _run_transfer(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    test = dumps.load_set(
+        dumps.set_dir(locations.embed_dir, args.run_name, dumps.STL10_TEST)
+    )
+    corrupt = dumps.load_set(
+        dumps.set_dir(locations.embed_dir, args.run_name, dumps.STL10_C)
+    )
+    if test is None or corrupt is None:
+        print(
+            f"need {dumps.STL10_TEST} and {dumps.STL10_C} dumps for {args.run_name}",
+            file=sys.stderr,
+        )
+        return 1
+    result = transfer.run_transfer(test, corrupt, cfg.eval, cfg.seed)
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.radius_transfer",
+        f"### Radius transfer (run `{args.run_name}`)\n\n"
+        "h is not analyzed; LeJEPA's product is z. Kernel ridge `u_hat -> rho_bar` "
+        f"fitted on {result.n_fit} clean `stl10_test` images (hyperparameters by "
+        f"leave-one-out CV on them: tau={result.tau:.3g}, alpha={result.alpha:.3g}), "
+        "applied to the corrupted versions of the other "
+        f"{result.n_held} images (`held-out twins`) and, for comparison, of the fit "
+        "images (`fit twins`). Shifts and residuals are in log-radius units (mean "
+        "over images, 95% bootstrap CI over images with the map held fixed); "
+        "`predicted shift` is the mean of `f(u_corrupted) - f(u_clean twin)`; "
+        "`R^2` is the transferred `R^2` within the cell; `nn_cos` is the "
+        "mean cosine to the nearest fit direction (support check). The last row is "
+        "the same map on the clean held-out images.\n\n"
+        + reporting.markdown_table(transfer.table_rows(result)),
+    )
+    if not args.no_figures:
+        links = _transfer_figures(result, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note,
+            "analyze.radius_transfer_figures",
+            "### Figures\n\n" + "\n\n".join(links),
+        )
+    print(f"wrote {note}")
+    return 0
+
+
 def _randomization_figures(
     comparisons: list[randomization.Comparison],
     note: pathlib.Path,
@@ -494,6 +645,35 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_aggregate_transfer(args: argparse.Namespace) -> int:
+    locations = paths.load_paths()
+    by_lambda: dict[float, list[list[dict[str, str]]]] = {}
+    names: list[str] = []
+    for relative in args.aggregate_transfer:
+        section = reporting.read_section(
+            locations.notes_dir / relative, "analyze.radius_transfer"
+        )
+        name = controls.run_name(section)
+        cfg = config.load_config(locations.runs_dir / name / "config.resolved.yaml")
+        by_lambda.setdefault(cfg.loss.lambda_, []).append(
+            reporting.parse_table(section)
+        )
+        names.append(name)
+    rows = transfer.aggregate_transfer(by_lambda)
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.radius_transfer_aggregate",
+        "### Radius transfer: mean ± std over seeds, per lambda\n\n"
+        f"Runs: {', '.join(f'`{n}`' for n in sorted(names))}. h is not analyzed; "
+        "LeJEPA's product is z. Aggregates the per-run tables (held-out twins); "
+        "`unexplained fraction` is the seed-mean residual over the seed-mean raw "
+        "shift.\n\n" + reporting.markdown_table(rows),
+    )
+    print(f"wrote {note}")
+    return 0
+
+
 def _run_aggregate_controls(args: argparse.Namespace) -> int:
     locations = paths.load_paths()
     by_lambda: dict[float, list[list[dict[str, str]]]] = {}
@@ -608,6 +788,245 @@ def _dynamics_figure(runs: dict[str, list[dynamics.Row]]) -> plotting.go.Figure:
     )
 
 
+def _power_figures(
+    study: sigreg_power.SyntheticStudy,
+    real: list[dict[str, str | float]],
+    note: pathlib.Path,
+    chrome: pathlib.Path | None,
+) -> list[str]:
+    prefix = note.parent / note.stem
+    links: list[str] = []
+
+    def column(
+        rows: list[dict[str, str | float]], where: dict[str, str | float], key: str
+    ) -> list[float]:
+        return [
+            float(r[key]) for r in rows if all(r.get(k) == v for k, v in where.items())
+        ]
+
+    kappas = list(sigreg_power.KAPPAS)
+    statistics = [f"SIGReg, {views} view(s)" for views in (1, study.num_views)] + [
+        "KS vs chi_d"
+    ]
+    series = {
+        f"{statistic} ({family})": plotting.Series(
+            kappas,
+            column(
+                study.power_rows,
+                {"family": family, "statistic": statistic},
+                "power",
+            ),
+        )
+        for family in sigreg_power.FAMILIES
+        for statistic in statistics
+    }
+    out = plotting.export_png(
+        plotting.line_plot(
+            series,
+            "Power at level 0.05 against N(0, I) (N per view, synthetic)",
+            "kappa = Var(||z||^2) / (2 d)",
+            "power",
+            reference=sigreg_power.LEVEL,
+        ),
+        f"{prefix}_power.png",
+        chrome,
+    )
+    links.append(reporting.image_link(out, note, "power against kappa"))
+
+    value_series: dict[str, plotting.Series] = {}
+    for family in sigreg_power.FAMILIES:
+        where: dict[str, str | float] = {
+            "family": family,
+            "statistic": "SIGReg, 1 view(s)",
+        }
+        mean = column(study.power_rows, where, "mean")
+        std = column(study.power_rows, where, "std")
+        value_series[f"synthetic {family}"] = plotting.Series(
+            kappas,
+            mean,
+            [m - s for m, s in zip(mean, std, strict=True)],
+            [m + s for m, s in zip(mean, std, strict=True)],
+        )
+    if real:
+        ordered = sorted(real, key=lambda r: float(r["kappa (center views)"]))
+        value_series["real checkpoints (center view)"] = plotting.Series(
+            [float(r["kappa (center views)"]) for r in ordered],
+            [float(r["SIGReg, center view"]) for r in ordered],
+        )
+    out = plotting.export_png(
+        plotting.line_plot(
+            value_series,
+            "Single-view SIGReg vs kappa (bars: 1 sd over repetitions)",
+            "kappa",
+            "SIGReg",
+            reference=study.null_mean,
+        ),
+        f"{prefix}_value.png",
+        chrome,
+    )
+    links.append(reporting.image_link(out, note, "SIGReg value against kappa"))
+    return links
+
+
+def _real_runs(args: argparse.Namespace, locations: paths.Paths) -> list[str]:
+    """Runs `PREFIX_*` that have an `stl10_test` dump."""
+    if args.runs_prefix is None:
+        return []
+    return sorted(
+        p.name
+        for p in locations.embed_dir.glob(f"{args.runs_prefix}_*")
+        if dumps.set_dir(locations.embed_dir, p.name, dumps.STL10_TEST).is_dir()
+    )
+
+
+def _run_power_unit(
+    unit: str,
+    study_cfg: sigreg_power.StudyConfig,
+    real_reps: int,
+    shard_dir: pathlib.Path,
+    locations: paths.Paths,
+    device: torch.device,
+) -> None:
+    """Computes one unit of the power study into its shard (skips finished ones)."""
+    if unit.startswith("real_"):
+        name = unit.removeprefix("real_")
+        if sigreg_power.load_real(shard_dir, unit, study_cfg, real_reps) is not None:
+            logger.info("%s: shard exists, skipping", unit)
+            return
+        shard = sigreg_power.load_real_shard(str(locations.embed_dir), name)
+        if shard is None:
+            raise FileNotFoundError(f"no stl10_test dump for run {name}")
+        metrics_file = locations.runs_dir / name / runlog.METRICS_FILE
+        records = runlog.read_metrics(metrics_file) if metrics_file.exists() else []
+        row = sigreg_power.real_row(
+            name,
+            shard,
+            study_cfg,
+            sigreg_power.last_training_dist(records),
+            device,
+            real_reps,
+        )
+        sigreg_power.save_real(shard_dir, unit, row, study_cfg, real_reps)
+        return
+    if unit not in sigreg_power.cell_units():
+        raise ValueError(f"unknown synthetic unit {unit!r}")
+    if sigreg_power.load_cell(shard_dir, unit, study_cfg) is not None:
+        logger.info("%s: shard exists, skipping", unit)
+        return
+    sigreg_power.save_cell(
+        shard_dir, sigreg_power.run_cell(unit, study_cfg, device), study_cfg
+    )
+
+
+def _write_power_note(
+    args: argparse.Namespace,
+    study_cfg: sigreg_power.StudyConfig,
+    real_reps: int,
+    shard_dir: pathlib.Path,
+    locations: paths.Paths,
+    real_names: list[str],
+) -> None:
+    """Aggregates the unit shards into the note (cheap, CPU only)."""
+    cells: dict[str, sigreg_power.CellResult] = {}
+    missing: list[str] = []
+    for unit in sigreg_power.cell_units():
+        cell = sigreg_power.load_cell(shard_dir, unit, study_cfg)
+        if cell is None:
+            missing.append(unit)
+        else:
+            cells[unit] = cell
+    raw_real: list[dict[str, str | float]] = []
+    for name in real_names:
+        unit = sigreg_power.real_unit(name)
+        row = sigreg_power.load_real(shard_dir, unit, study_cfg, real_reps)
+        if row is None:
+            missing.append(unit)
+        else:
+            raw_real.append(row)
+    if missing:
+        raise FileNotFoundError(
+            f"missing or stale shards in {shard_dir}: {', '.join(missing)}"
+        )
+    note = locations.notes_dir / args.note
+    rng = numpy.random.default_rng(study_cfg.seed + 1)
+    study = sigreg_power.assemble(cells, study_cfg)
+    real = [sigreg_power.standardize_real_row(row, study) for row in raw_real]
+    reporting.update_section(
+        note,
+        "sigreg_power.setup",
+        "### Synthetic setup\n\n"
+        + reporting.markdown_table(
+            [
+                {"parameter": key, "value": str(value)}
+                for key, value in dataclasses.asdict(study_cfg).items()
+            ]
+        ),
+    )
+    reporting.update_section(
+        note,
+        "sigreg_power.kurtosis",
+        "### Projection kurtosis: claimed vs exact vs Monte Carlo\n\n"
+        + reporting.markdown_table(sigreg_power.kurtosis_rows(study_cfg, rng)),
+    )
+    reporting.update_section(
+        note,
+        "sigreg_power.power",
+        "### SIGReg value and power against N(0, I)\n\n"
+        f"Null (exact Gaussians): single view {study.null_mean:.4g} ± "
+        f"{study.null_std:.3g}; {study_cfg.num_views} independent views "
+        f"{study.null_views[0]:.4g} ± {study.null_views[1]:.3g}. Power is the "
+        "fraction of repetitions above the 95% null quantile of the same "
+        "statistic.\n\n" + reporting.markdown_table(study.power_rows),
+    )
+    reporting.update_section(
+        note,
+        "sigreg_power.gradient",
+        "### Gradient of single-view SIGReg: radial vs tangential part\n\n"
+        + reporting.markdown_table(study.gradient_rows),
+    )
+    if args.runs_prefix is not None:
+        reporting.update_section(
+            note,
+            "sigreg_power.real",
+            "### Real z embeddings (STL-10 test, projector output)\n\n"
+            + reporting.markdown_table(real),
+        )
+    if not args.no_figures:
+        links = _power_figures(study, real, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note, "sigreg_power.figures", "### Figures\n\n" + "\n\n".join(links)
+        )
+    print(f"wrote {note}")
+
+
+def _run_sigreg_power(args: argparse.Namespace) -> int:
+    """Power study: list units, run one unit (GPU if available) or aggregate."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stderr
+    )
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    study_cfg = sigreg_power.study_config(cfg)
+    real_reps = cfg.eval.power_real_reps
+    shard_dir = locations.runs_dir / "sigreg_power" / args.power_shards
+    real_names = _real_runs(args, locations)
+    units = list(sigreg_power.cell_units()) + [
+        sigreg_power.real_unit(name) for name in real_names
+    ]
+    if args.power_list_units:
+        print("\n".join(units), flush=True)
+        return 0
+    if args.power_unit is not None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("unit %s on %s", args.power_unit, device)
+        _run_power_unit(
+            args.power_unit, study_cfg, real_reps, shard_dir, locations, device
+        )
+        return 0
+    _write_power_note(args, study_cfg, real_reps, shard_dir, locations, real_names)
+    return 0
+
+
 def main(argv: collections.abc.Sequence[str]) -> int:
     """Runs the analysis app; returns a process exit code."""
     args = _parse(argv)
@@ -621,6 +1040,12 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_epoch_unit(args)
     if args.epoch_sweep is not None:
         return _run_epoch_sweep(args)
+    if args.aggregate_transfer is not None:
+        return _run_aggregate_transfer(args)
+    if args.transfer:
+        return _run_transfer(args)
+    if args.sigreg_power:
+        return _run_sigreg_power(args)
     if args.redundancy_controls:
         return _run_redundancy_controls(args)
     cfg = config.load_config(args.config, args.overrides)

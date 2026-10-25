@@ -518,3 +518,62 @@ def group_mean_cv(
         residuals=t - pred,
         params=(),
     )
+
+
+class FittedKernelRidge:
+    """A kernel ridge map `u -> y` fitted once, to predict at new inputs.
+
+    Hyperparameters (bandwidth multiplier and penalty) are chosen by exact
+    leave-one-out CV on the fitting data only, so nothing about the points the
+    map is later applied to influences the fit.
+    """
+
+    def __init__(
+        self,
+        u: numpy.typing.ArrayLike,
+        y: numpy.typing.ArrayLike,
+        rng: numpy.random.Generator | None = None,
+        tau_multipliers: tuple[float, ...] = DEFAULT_TAU_MULTIPLIERS,
+        alphas: tuple[float, ...] = DEFAULT_ALPHAS,
+    ) -> None:
+        """Fits the map.
+
+        Args:
+            u: Unit-vector inputs, `(N, d)`.
+            y: Targets, `(N,)`.
+            rng: Random generator for the bandwidth estimate; seeded with 0 if
+                None.
+            tau_multipliers: Bandwidth grid, as multiples of the median pairwise
+                cosine distance of `u`.
+            alphas: Ridge penalty grid.
+        """
+        rng = rng if rng is not None else numpy.random.default_rng(0)
+        self._u = numpy.asarray(u, dtype=numpy.float64)
+        t = numpy.asarray(y, dtype=numpy.float64).ravel()
+        if t.size != self._u.shape[0]:
+            raise ValueError("y must have one entry per row of u")
+        grid = numpy.asarray(alphas, dtype=numpy.float64)
+        base = _median_cosine_distance(self._u, rng)
+        best: tuple[float, float, float, _CenteredKernelRidge] | None = None
+        for multiplier in tau_multipliers:
+            tau = multiplier * base
+            model = _CenteredKernelRidge(
+                _Spectrum(_gram(self._u, self._u, "exp_dot", tau)), t
+            )
+            mse = model.loo_mse(grid)
+            a = int(mse.argmin())
+            if best is None or mse[a] < best[0]:
+                best = (float(mse[a]), tau, float(grid[a]), model)
+        assert best is not None
+        self.loo_mse, self.tau, self.alpha, self._model = best
+
+    def predict(self, u: numpy.typing.ArrayLike, chunk: int = 8192) -> FloatArray:
+        """Predictions at the unit vectors `u`, `(M, d)` (in chunks of rows)."""
+        x = numpy.asarray(u, dtype=numpy.float64)
+        parts = [
+            self._model.predict(
+                _gram(x[i : i + chunk], self._u, "exp_dot", self.tau), self.alpha
+            )
+            for i in range(0, x.shape[0], chunk)
+        ]
+        return numpy.concatenate(parts) if parts else numpy.zeros(0)

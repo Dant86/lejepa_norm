@@ -21,6 +21,34 @@ from lejepa_norm.eval import metrics
 FloatArray = numpy.typing.NDArray[numpy.float64]
 
 
+def twin_index(
+    clean_image_id: numpy.typing.ArrayLike, corrupt_image_id: numpy.typing.ArrayLike
+) -> numpy.typing.NDArray[numpy.intp]:
+    """Row of each corrupted image's clean twin in the clean set.
+
+    Args:
+        clean_image_id: `(M,)` unique ids of the clean images.
+        corrupt_image_id: `(N,)` id of each corrupted image's clean twin.
+
+    Returns:
+        `(N,)` indices into the clean rows.
+
+    Raises:
+        ValueError: Clean ids are not unique, or a corrupted image has no clean
+            twin.
+    """
+    ids = numpy.asarray(clean_image_id).ravel()
+    order = numpy.argsort(ids, kind="stable")
+    sorted_ids = ids[order]
+    if numpy.any(sorted_ids[1:] == sorted_ids[:-1]):
+        raise ValueError("clean image ids must be unique")
+    query = numpy.asarray(corrupt_image_id).ravel()
+    pos = numpy.clip(numpy.searchsorted(sorted_ids, query), 0, ids.size - 1)
+    if ids.size == 0 or numpy.any(sorted_ids[pos] != query):
+        raise ValueError("some corrupted images have no clean twin")
+    return order[pos]
+
+
 def paired_radius_shift(
     clean_rho_bar: numpy.typing.ArrayLike,
     clean_image_id: numpy.typing.ArrayLike,
@@ -42,16 +70,8 @@ def paired_radius_shift(
         ValueError: Clean ids are not unique, or a corrupted image has no clean
             twin.
     """
-    ids = numpy.asarray(clean_image_id).ravel()
-    order = numpy.argsort(ids, kind="stable")
-    sorted_ids = ids[order]
-    if numpy.any(sorted_ids[1:] == sorted_ids[:-1]):
-        raise ValueError("clean image ids must be unique")
-    query = numpy.asarray(corrupt_image_id).ravel()
-    pos = numpy.clip(numpy.searchsorted(sorted_ids, query), 0, ids.size - 1)
-    if ids.size == 0 or numpy.any(sorted_ids[pos] != query):
-        raise ValueError("some corrupted images have no clean twin")
-    clean = numpy.asarray(clean_rho_bar, dtype=numpy.float64).ravel()[order]
+    pos = twin_index(clean_image_id, corrupt_image_id)
+    clean = numpy.asarray(clean_rho_bar, dtype=numpy.float64).ravel()
     return numpy.asarray(corrupt_rho_bar, dtype=numpy.float64).ravel() - clean[pos]
 
 
