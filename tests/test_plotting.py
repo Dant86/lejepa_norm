@@ -2,6 +2,7 @@
 
 import os
 import pathlib
+import typing
 
 import numpy
 import pytest
@@ -30,6 +31,23 @@ def test_export_rejects_non_png(tmp_path: pathlib.Path) -> None:
         plotting.export_png(fig, tmp_path / "fig.html")
 
 
+def test_dual_axis_plot_puts_right_series_on_second_axis() -> None:
+    fig = plotting.dual_axis_line_plot(
+        {"r2": plotting.Series([1, 2], [0.1, 0.9])},
+        {"kappa": plotting.Series([1, 2], [5.0, 20.0], [4.0, 18.0], [6.0, 22.0])},
+        "t",
+        "epoch",
+        "R^2",
+        "kappa",
+        right_reference=1.0,
+    )
+    spec = typing.cast("dict[str, typing.Any]", fig.to_dict())
+    traces = spec["data"]
+    assert [t["yaxis"] for t in traces] == ["y", "y2"]
+    assert spec["layout"]["yaxis2"]["overlaying"] == "y"
+    assert traces[0]["line"]["color"] != traces[1]["line"]["color"]
+
+
 @pytest.mark.slow  # headless Chrome
 def test_figures_render_to_png(tmp_path: pathlib.Path) -> None:
     chrome = _chrome()
@@ -42,8 +60,13 @@ def test_figures_render_to_png(tmp_path: pathlib.Path) -> None:
     assert out.read_bytes().startswith(b"\x89PNG")
 
 
+def _xaxis(fig: plotting.go.Figure) -> dict[str, typing.Any]:
+    layout = typing.cast(dict[str, typing.Any], fig.to_dict())["layout"]
+    return typing.cast(dict[str, typing.Any], layout["xaxis"])
+
+
 def test_line_plot_can_use_a_logarithmic_x_axis() -> None:
     series = {"a": plotting.Series(x=[50, 500, 5000], y=[1.0, 2.0, 3.0])}
-    log = plotting.line_plot(series, "t", "x", "y", log_x=True)
-    assert log.layout.xaxis.type == "log"
-    assert plotting.line_plot(series, "t", "x", "y").layout.xaxis.type is None
+    log = _xaxis(plotting.line_plot(series, "t", "x", "y", log_x=True))
+    assert log["type"] == "log" and log["tickvals"] == [50.0, 500.0, 5000.0]
+    assert "type" not in _xaxis(plotting.line_plot(series, "t", "x", "y"))
