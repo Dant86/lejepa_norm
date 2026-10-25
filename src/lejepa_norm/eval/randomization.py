@@ -570,6 +570,41 @@ def verdict(ci90: tuple[float, float], ci95: tuple[float, float], margin: float)
     return INCONCLUSIVE
 
 
+def bootstrap_draws(
+    num_images: int, num_seeds: int, num_bootstrap: int, rng: numpy.random.Generator
+) -> list[IntArray]:
+    """One `(num_bootstrap, num_images)` image resample per training seed."""
+    return [
+        rng.integers(0, num_images, size=(num_bootstrap, num_images))
+        for _ in range(num_seeds)
+    ]
+
+
+def bootstrap_seed_mean(
+    draws: collections.abc.Sequence[IntArray],
+    statistic: collections.abc.Callable[[int, IntArray], FloatArray],
+) -> FloatArray:
+    """Replicates of a per-seed statistic averaged over the training seeds.
+
+    Args:
+        draws: Image resamples per seed (`bootstrap_draws`).
+        statistic: `(seed_index, resample_indices) -> (num_bootstrap,)`, the
+            statistic of that seed on every resample.
+
+    Returns:
+        `(num_bootstrap,)` mean over seeds of the statistic.
+    """
+    return numpy.mean([statistic(s, idx) for s, idx in enumerate(draws)], axis=0)
+
+
+def intervals(boot: FloatArray) -> tuple[tuple[float, float], tuple[float, float]]:
+    """The 90% and 95% percentile intervals of bootstrap replicates."""
+    lo90, hi90, lo95, hi95 = (
+        float(v) for v in numpy.quantile(boot, [0.05, 0.95, 0.025, 0.975])
+    )
+    return (lo90, hi90), (lo95, hi95)
+
+
 def compare(
     results: list[RunResult],
     margin: float,
@@ -598,9 +633,7 @@ def compare(
         group = sorted((r for r in results if r.lam == lam), key=lambda r: r.seed)
         num_images = next(iter(group[0].evaluation.cells.values())).correct.size
         # One resample per seed, shared by every comparison of that seed.
-        draws = [
-            rng.integers(0, num_images, size=(num_bootstrap, num_images)) for _ in group
-        ]
+        draws = bootstrap_draws(num_images, len(group), num_bootstrap, rng)
         for reader in readers:
             for protocol in PROTOCOLS:
                 base_cells = [
@@ -614,16 +647,10 @@ def compare(
                         c.correct - b.correct
                         for c, b in zip(cells, base_cells, strict=True)
                     ]
-                    boot = numpy.mean(
-                        [
-                            d[idx].mean(axis=1)
-                            for d, idx in zip(diffs, draws, strict=True)
-                        ],
-                        axis=0,
-                    )
-                    lo90, hi90, lo95, hi95 = (
-                        float(v)
-                        for v in numpy.quantile(boot, [0.05, 0.95, 0.025, 0.975])
+                    ci90, ci95 = intervals(
+                        bootstrap_seed_mean(
+                            draws, lambda s, idx, d=diffs: d[s][idx].mean(axis=1)
+                        )
                     )
                     base = statistics.fmean(float(b.correct.mean()) for b in base_cells)
                     acc = statistics.fmean(float(c.correct.mean()) for c in cells)
@@ -637,9 +664,9 @@ def compare(
                             baseline=base,
                             accuracy=acc,
                             difference=acc - base,
-                            ci90=(lo90, hi90),
-                            ci95=(lo95, hi95),
-                            verdict=verdict((lo90, hi90), (lo95, hi95), margin),
+                            ci90=ci90,
+                            ci95=ci95,
+                            verdict=verdict(ci90, ci95, margin),
                         )
                     )
     return out
