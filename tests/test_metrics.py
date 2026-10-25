@@ -76,6 +76,19 @@ def test_nested_kernel_ridge_reuses_spectra_across_targets() -> None:
         model.fit(y1[:-1])
 
 
+def test_batched_r2_matches_one_by_one_fits() -> None:
+    u = _sphere(300, 8, 11)
+    rng = _rng(12)
+    ys = numpy.stack([rng.normal(size=300), numpy.sin(3 * u[:, 0])] * 3)
+    ys[2:] += 0.3 * rng.normal(size=(4, 300))
+    model = redundancy.NestedKernelRidge(u, "exp_dot", 5, _rng(13))
+    expected = numpy.array([model.fit(y).r2 for y in ys])
+    numpy.testing.assert_allclose(model.r2_many(ys, chunk=4), expected, atol=1e-10)
+    assert model.r2_many(ys[:0]).shape == (0,)
+    with pytest.raises(ValueError):
+        model.r2_many(ys[:, :-1])
+
+
 def test_permutation_test_separates_dependent_from_independent_radius() -> None:
     u = _sphere(400, 6, 14)
     model = redundancy.NestedKernelRidge(u, "exp_dot", 5, _rng(15))

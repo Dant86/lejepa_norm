@@ -34,6 +34,16 @@ result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
 section; no other analysis runs and no figures are made.
 
+The epoch sweep of the redundancy of `z` (see `lejepa_norm.eval.dynamics`) works
+on the per-epoch `stl10_test` dumps written by `apps/embed.py` under
+`radius_dynamics/RUN/epoch_XXXX` and has two steps. `--epoch-unit RUN EPOCH`
+computes the R^2, kappa_z, ICC and reliability of one (run, epoch) and writes one
+JSON shard (resumable: a finished shard is reused; this is what each job of
+`slurm/analyze_epochs.sbatch` runs; no note is written). `--epoch-sweep RUN...`
+is the cheap aggregation: it reads the shards (computing none) and writes per-run
+tables, a table by epoch (mean ± std over runs) and a figure into `--note`. The
+permutation null uses `eval.num_permutations` repetitions.
+
 With `--randomize-radius PREFIX`, the radius of z-space embeddings is randomized
 before k-NN, linear-probe and MLP classification of the STL-10 labels (bank:
 `stl10_train` dump, test set: `stl10_test` dump; z only; see
@@ -61,6 +71,10 @@ Examples:
         a_l0.05_s1_controls.md --note radius-conditional/controls_summary.md
     python apps/analyze.py --sweep radius_marginal \
         --note radius_marginal/lambda_sweep.md
+    python apps/analyze.py --config configs/base.yaml --set eval.num_permutations=20 \
+        --epoch-unit a_l0.05_s0 10
+    python apps/analyze.py --config configs/base.yaml --set eval.num_permutations=20 \
+        --epoch-sweep a_l0.05_s0 a_l0.05_s1 --note radius_dynamics/sweep.md
     python apps/analyze.py --sigreg-power --config configs/base.yaml \
         --runs-prefix radius_marginal --power-unit null
     python apps/analyze.py --sigreg-power --config configs/base.yaml \
@@ -89,6 +103,7 @@ from lejepa_norm import reporting
 from lejepa_norm.eval import analysis
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
+from lejepa_norm.eval import dynamics
 from lejepa_norm.eval import randomization
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
@@ -136,6 +151,20 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         metavar="CONTROLS_NOTE",
         help="Aggregate per-run redundancy-controls notes (relative to the notes "
         "dir) over seeds, per lambda, into --note.",
+    )
+    mode.add_argument(
+        "--epoch-sweep",
+        nargs="+",
+        metavar="RUN",
+        help="Epoch sweep of the redundancy of z over the per-epoch dumps of "
+        "these runs (needs --config), into --note.",
+    )
+    mode.add_argument(
+        "--epoch-unit",
+        nargs=2,
+        metavar=("RUN", "EPOCH"),
+        help="Compute and store the shard of one (run, epoch) of the epoch sweep "
+        "(needs --config; writes no note).",
     )
     mode.add_argument(
         "--aggregate-transfer",
@@ -189,13 +218,16 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: run just the clean-to-corrupted radius transfer.",
     )
     args = parser.parse_args(argv)
+    needs_config = (args.run_name, args.epoch_sweep, args.epoch_unit)
+    if any(m is not None for m in needs_config) and args.config is None:
+        parser.error("--run-name, --epoch-sweep and --epoch-unit require --config")
     if args.transfer and args.run_name is None:
         parser.error("--transfer requires --run-name")
-    if args.run_name is not None and args.config is None:
-        parser.error("--run-name requires --config")
     if args.sigreg_power and args.config is None:
         parser.error("--sigreg-power requires --config")
-    if args.note is None and not (args.power_unit or args.power_list_units):
+    if args.note is None and not (
+        args.epoch_unit or args.power_unit or args.power_list_units
+    ):
         parser.error("--note is required")
     if args.randomize_radius is not None and args.config is None:
         parser.error("--randomize-radius requires --config")
@@ -673,6 +705,89 @@ def _run_aggregate_controls(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_epoch_unit(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    run, epoch = args.epoch_unit
+    dynamics.run_unit(
+        locations.embed_dir,
+        run,
+        int(epoch),
+        cfg.eval,
+        cfg.seed,
+        cfg.eval.num_permutations,
+    )
+    return 0
+
+
+def _run_epoch_sweep(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    note = locations.notes_dir / args.note
+    runs = dynamics.collect(
+        locations.embed_dir,
+        args.epoch_sweep,
+        cfg.eval,
+        cfg.seed,
+        cfg.eval.num_permutations,
+    )
+    for run, rows in runs.items():
+        reporting.update_section(
+            note,
+            f"dynamics.run.{run}",
+            f"### Epoch sweep, run `{run}`\n\n" + reporting.markdown_table(rows),
+        )
+    reporting.update_section(
+        note,
+        "dynamics.table",
+        "### Redundancy and kappa_z by epoch: mean ± std over seeds\n\n"
+        f"Runs: {', '.join(f'`{r}`' for r in runs)}. `z` only, `stl10_test`, "
+        f"{cfg.eval.max_kernel_images} images for the regressions (the same images "
+        f"at every epoch), K = {cfg.eval.num_views} augmented views; `r2_same`: "
+        "rho_bar ~ u_hat from all views; `r2_cross`: disjoint view halves (mean of "
+        "both directions); `reliability`: split-half r^2 of rho_bar; `icc`: "
+        "ICC(1) of the log-radius over views; `kappa_z` on the augmented views "
+        f"of all test images (`kappa_z_center`: center view). Permutation null: "
+        f"{cfg.eval.num_permutations} shuffles per regression.\n\n"
+        + reporting.markdown_table(dynamics.aggregate(runs)),
+    )
+    if not args.no_figures:
+        fig = _dynamics_figure(runs)
+        out = plotting.export_png(
+            fig, note.parent / f"{note.stem}_r2_kappa.png", locations.kaleido_chrome
+        )
+        reporting.update_section(
+            note,
+            "dynamics.figure",
+            "### Figure\n\n"
+            + reporting.image_link(out, note, "R^2 and kappa_z vs epoch"),
+        )
+    print(f"wrote {note}")
+    return 0
+
+
+def _dynamics_figure(runs: dict[str, list[dynamics.Row]]) -> plotting.go.Figure:
+    def series(key: str) -> plotting.Series:
+        c = dynamics.curve(runs, key)
+        return plotting.Series(
+            c.epochs, list(c.mean), list(c.mean - c.std), list(c.mean + c.std)
+        )
+
+    return plotting.dual_axis_line_plot(
+        {
+            "R^2 same views": series("r2_same"),
+            "R^2 disjoint halves": series("r2_cross"),
+            "split-half reliability": series("reliability"),
+        },
+        {"kappa_z (right axis)": series("kappa_z")},
+        "Redundancy of the radius and kappa_z over training (mean ± std over seeds)",
+        "epoch",
+        "R^2 / reliability",
+        "kappa_z",
+        right_reference=1.0,
+    )
+
+
 def _power_figures(
     study: sigreg_power.SyntheticStudy,
     real: list[dict[str, str | float]],
@@ -921,6 +1036,10 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_randomize_radius(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
+    if args.epoch_unit is not None:
+        return _run_epoch_unit(args)
+    if args.epoch_sweep is not None:
+        return _run_epoch_sweep(args)
     if args.aggregate_transfer is not None:
         return _run_aggregate_transfer(args)
     if args.transfer:
