@@ -32,6 +32,13 @@ condition feeds unit-norm test embeddings to a reader fitted on raw-radius
 features; for Euclidean k-NN this mixes the bank radii into the ranking, as in
 the E1 frozen protocol.
 
+A fourth treatment, `SCALED_CONSTANT` (every embedding rescaled to the median bank
+radius), was added post hoc after the first results showed the unit-norm
+`constant` condition collapsing frozen readers to chance (the scale mismatch E1
+already documented on clean images, about a factor 16, not a statement about
+information in the radius). The unit-norm results are kept; the scale-matched
+variant is the one that answers "does normalizing recover accuracy".
+
 Statistics: per-image correctness of every condition (averaged over shuffle
 repeats) is compared with the baseline's on the same corrupted test images.
 `compare` resamples test images within each training seed (the same resample for
@@ -73,7 +80,14 @@ SHIFT_READERS = (
     randomization.MLP,
 )
 # Conditions compared with the baseline.
-TREATMENTS = randomization.CONDITIONS[1:]
+# Added after the first results (post hoc): the unit-norm `constant` condition feeds
+# frozen readers features about 16x smaller than any they were fitted on (E1 found
+# the same artifact on clean images), so it measures scale mismatch. This variant
+# puts every embedding at the median bank radius instead (same direction, scale
+# matched); for the retrained protocol it is equivalent to the unit-norm one up to
+# the reader's scale sensitivity.
+SCALED_CONSTANT = "constant radius (bank median)"
+TREATMENTS = (*randomization.CONDITIONS[1:], SCALED_CONSTANT)
 
 CLEAN = "clean"
 OVERALL = "all corruptions"
@@ -283,13 +297,17 @@ def evaluate_cells(
         randomization.RESIDUAL: randomization.residual_shuffle,
     }
     unit_bank = randomization.constant_radius(bank)
+    median_radius = float(numpy.median(features.radius(bank)))
+    scaled_bank = randomization.constant_radius(bank, median_radius)
     clean_fit: dict[str, randomization.Predictor] = {}
     constant_fit: dict[str, randomization.Predictor] = {}
+    scaled_fit: dict[str, randomization.Predictor] = {}
     shuffled_fit: dict[tuple[str, str, int], randomization.Predictor] = {}
     for reader in readers:
         fit = randomization.make_fit(reader, by, k, num_classes, seed, weight_decay)
         clean_fit[reader] = fit(bank)
         constant_fit[reader] = fit(unit_bank)
+        scaled_fit[reader] = fit(scaled_bank)
         for condition, transform in transforms.items():
             for repeat in range(num_repeats):
                 rng_bank = numpy.random.default_rng([seed, repeat, 0])
@@ -311,6 +329,7 @@ def evaluate_cells(
             )
             radius_shift[cell] = float(numpy.mean(rho - twin))
         unit_x = randomization.constant_radius(x)
+        scaled_x = randomization.constant_radius(x, median_radius)
         modified: dict[tuple[str, int], FloatArray] = {}
         for condition, transform in transforms.items():
             for repeat in range(num_repeats):
@@ -344,6 +363,18 @@ def evaluate_cells(
                 randomization.RETRAIN,
                 randomization.CONSTANT,
                 [constant_fit[reader](unit_x)],
+            )
+            store(
+                reader,
+                randomization.FROZEN,
+                SCALED_CONSTANT,
+                [clean_fit[reader](scaled_x)],
+            )
+            store(
+                reader,
+                randomization.RETRAIN,
+                SCALED_CONSTANT,
+                [scaled_fit[reader](scaled_x)],
             )
             for condition in transforms:
                 xs = [modified[condition, r] for r in range(num_repeats)]
@@ -646,19 +677,23 @@ def context_rows(
             for reader in _readers(units):
                 row[f"{reader} acc"] = f"{_mean_accuracy(group, reader, mine):.4f}"
             for reader in _readers(units):
-                const = next(
-                    x
-                    for x in comparisons
-                    if x.lam == lam
-                    and x.corruption == corruption
-                    and x.severity == AVERAGED
-                    and x.reader == reader
-                    and x.protocol == randomization.FROZEN
-                    and x.condition == randomization.CONSTANT
-                )
-                row[f"{reader}: frozen constant change (points)"] = (
-                    f"{100 * const.difference:+.2f}"
-                )
+                for condition, label in (
+                    (randomization.CONSTANT, "unit norm"),
+                    (SCALED_CONSTANT, "bank-median radius"),
+                ):
+                    const = next(
+                        x
+                        for x in comparisons
+                        if x.lam == lam
+                        and x.corruption == corruption
+                        and x.severity == AVERAGED
+                        and x.reader == reader
+                        and x.protocol == randomization.FROZEN
+                        and x.condition == condition
+                    )
+                    row[f"{reader}: frozen, {label} (points)"] = (
+                        f"{100 * const.difference:+.2f}"
+                    )
             rows.append(row)
     return rows
 
@@ -722,7 +757,7 @@ def figures(
                     if c.lam == lam
                     and c.reader == reader
                     and c.protocol == randomization.FROZEN
-                    and c.condition == randomization.CONSTANT
+                    and c.condition == SCALED_CONSTANT
                     and c.corruption == corruption
                     and c.severity != AVERAGED
                 ),
@@ -739,7 +774,7 @@ def figures(
                 f"lam{lam:g}_{slug}_constant_by_corruption",
                 plotting.line_plot(
                     per_corruption,
-                    f"Frozen {reader}, unit-norm corrupted test (lambda {lam:g})",
+                    f"Frozen {reader}, median-radius test (lambda {lam:g})",
                     "severity",
                     "accuracy change vs baseline (points)",
                     reference=0.0,

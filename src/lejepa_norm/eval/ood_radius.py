@@ -25,6 +25,12 @@ Scores (`k` = `EvalConfig.knn_k`, distances to the k-th nearest bank embedding):
   evaluation data (re-chosen inside every bootstrap replicate). If even this
   does not beat the direction score, no linear use of the radius helps.
 
+* `post hoc: direction + low radius` (added after the first results, NOT
+  pre-registered): the `w = -1` member of the weight grid above, i.e. the
+  equal-weight sum of the direction score and the *negated* standardized signed
+  log-radius. The orientation (OOD = smaller radius) was read off the radius-alone
+  AUROC, which is below 0.5; treat it as exploratory.
+
 Controls analogous to the radius randomization of E1 (`NUM_PERMUTATIONS`
 repeats, averaged AUROC): the radius is permuted across images, and the
 permutation is over the *pooled* query set (ID test and the OOD set), which
@@ -83,6 +89,7 @@ KNN_DIRECTION = "kNN distance, direction only (unit z)"
 KNN_RAW = "kNN distance, raw z"
 COMBINED = "direction + radius deviation (equal weights)"
 ORACLE = "direction + signed log-radius, best weight (optimistic)"
+POSTHOC_LOW = "post hoc: direction + low radius (w = -1 on signed log-radius)"
 KNN_RAW_PERMUTED = "control: kNN distance, raw z, radius permuted"
 DEVIATION_PERMUTED = "control: radius deviation, radius permuted"
 COMBINED_PERMUTED = "control: direction + radius deviation, radius permuted"
@@ -93,6 +100,7 @@ SCORES = (
     KNN_RAW,
     COMBINED,
     ORACLE,
+    POSTHOC_LOW,
     KNN_RAW_PERMUTED,
     DEVIATION_PERMUTED,
     COMBINED_PERMUTED,
@@ -361,8 +369,11 @@ def _reduce(
     out_a: dict[str, FloatArray] = {}
     out_f: dict[str, FloatArray] = {}
     for score in SCORES:
+        wanted = f"{ORACLE} | w=-1" if score == POSTHOC_LOW else score
         members = [
-            i for i, n in enumerate(names) if n == score or n.startswith(score + " | ")
+            i
+            for i, n in enumerate(names)
+            if n == wanted or n.startswith(wanted + " | ")
         ]
         if score == ORACLE:
             best = auroc[:, members].argmax(axis=1)
@@ -516,6 +527,11 @@ def score_rows(results: list[OodResult]) -> list[Row]:
 DIFFERENCES = (
     ("direction + radius  minus  direction only", COMBINED, KNN_DIRECTION),
     ("best-weight signed radius  minus  direction only", ORACLE, KNN_DIRECTION),
+    (
+        "post hoc: direction + low radius (w=-1)  minus  direction only",
+        POSTHOC_LOW,
+        KNN_DIRECTION,
+    ),
     ("raw kNN  minus  direction only", KNN_RAW, KNN_DIRECTION),
     ("raw kNN  minus  raw kNN with radius permuted", KNN_RAW, KNN_RAW_PERMUTED),
     (

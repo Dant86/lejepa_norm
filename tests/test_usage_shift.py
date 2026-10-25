@@ -130,6 +130,8 @@ def test_radius_shift_hurts_frozen_readers_and_normalizing_recovers() -> None:
         acc(units[0], randomization.CONSTANT, ("rescale", 1)),
     )
     assert const > base  # the shifted radius hurts; normalizing recovers
+    scaled = acc(units[0], shift.SCALED_CONSTANT, ("rescale", 1))
+    assert scaled > base
     # Retrain baseline is the frozen baseline (same reader, same bank).
     key = (KNN, randomization.RETRAIN, "baseline", "rescale", 1)
     numpy.testing.assert_array_equal(
@@ -144,8 +146,8 @@ def test_radius_shift_hurts_frozen_readers_and_normalizing_recovers() -> None:
         (c.reader, c.protocol, c.condition, c.corruption, c.severity): c
         for c in comparisons
     }
-    # readers x protocols x conditions x (cells + corruptions + severities + 1)
-    assert len(comparisons) == 2 * 2 * 3 * 9
+    # readers x protocols x 4 conditions x (cells + corruptions + severities + 1)
+    assert len(comparisons) == 2 * 2 * 4 * 9
     gain = index[KNN, randomization.FROZEN, randomization.CONSTANT, "rescale", 0]
     assert gain.difference > 0 and gain.verdict in {
         randomization.DIFFERENT,
@@ -161,11 +163,11 @@ def test_radius_shift_hurts_frozen_readers_and_normalizing_recovers() -> None:
     assert overall.difference == pytest.approx(pooled)
     for c in comparisons:
         assert c.ci95[0] <= c.difference <= c.ci95[1] or c.ci95[0] == c.ci95[1]
-    assert len(shift.cell_rows(comparisons, 0.05)) == 2 * 3 * 4
+    assert len(shift.cell_rows(comparisons, 0.05)) == 2 * 4 * 4
     assert shift.corruption_rows(comparisons, 0.05)
     context = shift.context_rows(units, comparisons)
     assert context[0]["corruption"] == "clean test (reference)"
-    assert len(shift.shift_correlations(units)) == 2 * 3
+    assert len(shift.shift_correlations(units)) == 2 * 4
     assert len(shift.figures(comparisons, 0.05)) == 2 * len(READERS)
 
 
