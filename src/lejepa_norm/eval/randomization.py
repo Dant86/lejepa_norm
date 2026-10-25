@@ -236,7 +236,7 @@ def select_weight_decay(
     return weight_decays[int(numpy.argmax(scores))]
 
 
-def _make_fit(
+def make_fit(
     reader: str,
     labels: IntArray,
     k: int,
@@ -407,7 +407,7 @@ def evaluate(
 
     cells: dict[Key, Cell] = {}
     for reader in readers:
-        fit = _make_fit(reader, by, k, num_classes, seed, weight_decay)
+        fit = make_fit(reader, by, k, num_classes, seed, weight_decay)
         for (protocol, condition), cell in condition_cells(
             fit, bank, query, qy, model, num_repeats, seed
         ).items():
