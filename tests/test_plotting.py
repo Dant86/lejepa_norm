@@ -2,6 +2,7 @@
 
 import os
 import pathlib
+import typing
 
 import numpy
 import pytest
@@ -28,6 +29,23 @@ def test_export_rejects_non_png(tmp_path: pathlib.Path) -> None:
     fig = plotting.scatter([1, 2], [3, 4], "t", "x", "y")
     with pytest.raises(ValueError, match="PNG"):
         plotting.export_png(fig, tmp_path / "fig.html")
+
+
+def test_dual_axis_plot_puts_right_series_on_second_axis() -> None:
+    fig = plotting.dual_axis_line_plot(
+        {"r2": plotting.Series([1, 2], [0.1, 0.9])},
+        {"kappa": plotting.Series([1, 2], [5.0, 20.0], [4.0, 18.0], [6.0, 22.0])},
+        "t",
+        "epoch",
+        "R^2",
+        "kappa",
+        right_reference=1.0,
+    )
+    spec = typing.cast("dict[str, typing.Any]", fig.to_dict())
+    traces = spec["data"]
+    assert [t["yaxis"] for t in traces] == ["y", "y2"]
+    assert spec["layout"]["yaxis2"]["overlaying"] == "y"
+    assert traces[0]["line"]["color"] != traces[1]["line"]["color"]
 
 
 @pytest.mark.slow  # headless Chrome

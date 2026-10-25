@@ -87,6 +87,29 @@ class _Spectrum:
         centered += self.all_mean
         eigvals, self.eigvecs = numpy.linalg.eigh(centered)
         self.eigvals = numpy.clip(eigvals, 0.0, None)
+        self._leverage: tuple[bytes, FloatArray] | None = None
+
+    def keep(self, alphas: FloatArray) -> FloatArray:
+        """`alpha / (lambda + alpha)`, shape `(n, len(alphas))`.
+
+        Formed directly (not as 1 - shrinkage) to avoid cancellation when
+        alpha << lambda.
+        """
+        return alphas[None, :] / (self.eigvals[:, None] + alphas[None, :])
+
+    def one_minus_h(self, alphas: FloatArray) -> FloatArray:
+        """`1 - H_ii` of the leave-one-out formula, `(n, len(alphas))`.
+
+        It does not depend on the target, so it is computed once and cached (the
+        permutation null re-fits the same spectrum hundreds of times). The
+        intercept adds 1/n to H_ii; the constant eigenvector (lambda = 0)
+        contributes exactly 1/n to the sum, so it is subtracted.
+        """
+        key = alphas.tobytes()
+        if self._leverage is None or self._leverage[0] != key:
+            value = numpy.square(self.eigvecs) @ self.keep(alphas)
+            self._leverage = (key, value - 1.0 / self.eigvals.size)
+        return self._leverage[1]
 
 
 class _CenteredKernelRidge:
@@ -100,15 +123,10 @@ class _CenteredKernelRidge:
 
     def loo_mse(self, alphas: FloatArray) -> FloatArray:
         """Exact leave-one-out MSE for each penalty in `alphas`."""
-        # Residuals and 1 - H_ii are formed from alpha / (lambda + alpha) directly
-        # (not as 1 - shrinkage) to avoid cancellation when alpha << lambda.
-        # The intercept adds 1/n to H_ii; the constant eigenvector (lambda = 0)
-        # contributes exactly 1/n to the sum below, so it is subtracted.
         eigvecs = self.spectrum.eigvecs
-        keep = alphas[None, :] / (self.spectrum.eigvals[:, None] + alphas[None, :])
+        keep = self.spectrum.keep(alphas)
         resid = eigvecs @ (keep * self.qty[:, None])
-        one_minus_h = numpy.square(eigvecs) @ keep - 1.0 / self.yc.size
-        loo = resid / numpy.maximum(one_minus_h, 1e-12)
+        loo = resid / numpy.maximum(self.spectrum.one_minus_h(alphas), 1e-12)
         return numpy.square(loo).mean(axis=0)
 
     def predict(self, test_gram: FloatArray, alpha: float) -> FloatArray:
@@ -197,6 +215,78 @@ class NestedKernelRidge:
                 )
             )
         self._kernel = kernel
+
+    def r2_many(
+        self, ys: FloatArray, chunk: int = 64
+    ) -> numpy.typing.NDArray[numpy.float64]:
+        """Pooled held-out `R^2` of several targets at once, `(P,)`.
+
+        Equivalent to `[self.fit(y).r2 for y in ys]` (hyperparameters are
+        re-selected for every target) but the eigenvector products are batched
+        over targets, which turns matrix-vector into matrix-matrix products:
+        about an order of magnitude faster for permutation nulls.
+
+        Args:
+            ys: Targets, `(P, N)`.
+            chunk: Targets processed per batch (bounds memory).
+        """
+        targets = numpy.asarray(ys, dtype=numpy.float64)
+        if targets.ndim != 2 or targets.shape[1] != self.num_samples:
+            raise ValueError("ys must have shape (P, N)")
+        out = [
+            self._r2_batch(targets[i : i + chunk])
+            for i in range(0, targets.shape[0], chunk)
+        ]
+        return numpy.concatenate(out) if out else numpy.empty(0)
+
+    def _r2_batch(self, targets: FloatArray) -> FloatArray:
+        num = targets.shape[0]
+        pred = numpy.empty_like(targets)
+        for fold in self._folds:
+            y_tr = targets[:, fold.train_idx]
+            y_mean = y_tr.mean(axis=1)
+            yc = (y_tr - y_mean[:, None]).T  # (n_train, P)
+            best_mse = numpy.full(num, numpy.inf)
+            best_tau = numpy.zeros(num, dtype=numpy.int64)
+            best_alpha = numpy.zeros(num, dtype=numpy.int64)
+            qtys: list[FloatArray] = []
+            for k, spec in enumerate(fold.spectra):
+                qty = spec.eigvecs.T @ yc  # (n_train, P)
+                qtys.append(qty)
+                keep = spec.keep(self.alphas)  # (n_train, A)
+                omh = numpy.maximum(spec.one_minus_h(self.alphas), 1e-12)
+                mse = numpy.empty((self.alphas.size, num))
+                for a in range(self.alphas.size):
+                    resid = spec.eigvecs @ (keep[:, a : a + 1] * qty)
+                    mse[a] = numpy.square(resid / omh[:, a : a + 1]).mean(axis=0)
+                arg = mse.argmin(axis=0)
+                val = mse[arg, numpy.arange(num)]
+                better = val < best_mse
+                best_mse = numpy.where(better, val, best_mse)
+                best_tau = numpy.where(better, k, best_tau)
+                best_alpha = numpy.where(better, arg, best_alpha)
+            for k, spec in enumerate(fold.spectra):
+                sel = numpy.flatnonzero(best_tau == k)
+                if sel.size == 0:
+                    continue
+                alpha = self.alphas[best_alpha[sel]]
+                coef = spec.eigvecs @ (
+                    qtys[k][:, sel] / (spec.eigvals[:, None] + alpha[None, :])
+                )
+                tg = fold.test_grams[k]
+                centered = (
+                    tg
+                    - tg.mean(axis=1, keepdims=True)
+                    - spec.col_mean[None, :]
+                    + spec.all_mean
+                )
+                pred[numpy.ix_(sel, fold.test_idx)] = (
+                    y_mean[sel, None] + (centered @ coef).T
+                )
+        ss_res = numpy.square(targets - pred).sum(axis=1)
+        ss_tot = numpy.square(targets - targets.mean(axis=1, keepdims=True)).sum(axis=1)
+        with numpy.errstate(divide="ignore", invalid="ignore"):
+            return numpy.where(ss_tot > 0, 1.0 - ss_res / ss_tot, numpy.nan)
 
     def fit(self, y: numpy.typing.ArrayLike) -> RegressionResult:
         """Held-out predictions and `R^2` for the target `y`, `(N,)`."""
@@ -334,9 +424,10 @@ def permutation_test(
     """Permutation null of the held-out `R^2` of `model` for the target `y`."""
     t = numpy.asarray(y, dtype=numpy.float64).ravel()
     observed = model.fit(t).r2
-    null = numpy.array(
-        [model.fit(rng.permutation(t)).r2 for _ in range(num_permutations)]
-    )
+    shuffled = numpy.empty((num_permutations, t.size))
+    for row in shuffled:
+        row[:] = rng.permutation(t)
+    null = model.r2_many(shuffled)
     p_value = (1 + int((null >= observed).sum())) / (1 + num_permutations)
     return PermutationTest(observed=observed, null=null, p_value=p_value)
 
@@ -427,3 +518,62 @@ def group_mean_cv(
         residuals=t - pred,
         params=(),
     )
+
+
+class FittedKernelRidge:
+    """A kernel ridge map `u -> y` fitted once, to predict at new inputs.
+
+    Hyperparameters (bandwidth multiplier and penalty) are chosen by exact
+    leave-one-out CV on the fitting data only, so nothing about the points the
+    map is later applied to influences the fit.
+    """
+
+    def __init__(
+        self,
+        u: numpy.typing.ArrayLike,
+        y: numpy.typing.ArrayLike,
+        rng: numpy.random.Generator | None = None,
+        tau_multipliers: tuple[float, ...] = DEFAULT_TAU_MULTIPLIERS,
+        alphas: tuple[float, ...] = DEFAULT_ALPHAS,
+    ) -> None:
+        """Fits the map.
+
+        Args:
+            u: Unit-vector inputs, `(N, d)`.
+            y: Targets, `(N,)`.
+            rng: Random generator for the bandwidth estimate; seeded with 0 if
+                None.
+            tau_multipliers: Bandwidth grid, as multiples of the median pairwise
+                cosine distance of `u`.
+            alphas: Ridge penalty grid.
+        """
+        rng = rng if rng is not None else numpy.random.default_rng(0)
+        self._u = numpy.asarray(u, dtype=numpy.float64)
+        t = numpy.asarray(y, dtype=numpy.float64).ravel()
+        if t.size != self._u.shape[0]:
+            raise ValueError("y must have one entry per row of u")
+        grid = numpy.asarray(alphas, dtype=numpy.float64)
+        base = _median_cosine_distance(self._u, rng)
+        best: tuple[float, float, float, _CenteredKernelRidge] | None = None
+        for multiplier in tau_multipliers:
+            tau = multiplier * base
+            model = _CenteredKernelRidge(
+                _Spectrum(_gram(self._u, self._u, "exp_dot", tau)), t
+            )
+            mse = model.loo_mse(grid)
+            a = int(mse.argmin())
+            if best is None or mse[a] < best[0]:
+                best = (float(mse[a]), tau, float(grid[a]), model)
+        assert best is not None
+        self.loo_mse, self.tau, self.alpha, self._model = best
+
+    def predict(self, u: numpy.typing.ArrayLike, chunk: int = 8192) -> FloatArray:
+        """Predictions at the unit vectors `u`, `(M, d)` (in chunks of rows)."""
+        x = numpy.asarray(u, dtype=numpy.float64)
+        parts = [
+            self._model.predict(
+                _gram(x[i : i + chunk], self._u, "exp_dot", self.tau), self.alpha
+            )
+            for i in range(0, x.shape[0], chunk)
+        ]
+        return numpy.concatenate(parts) if parts else numpy.zeros(0)
