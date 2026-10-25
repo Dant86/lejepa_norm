@@ -28,6 +28,12 @@ result are run (permutation null, cross-view regressions, F-test; see
 `lejepa_norm.eval.controls`) on the `stl10_test` dump and written to their own
 section; no other analysis runs and no figures are made.
 
+With `--lowlabel PREFIX` (needs `--config`), the E1 readers are repeated with a
+small labeled bank (`lejepa_norm.eval.lowlabel`): `--lowlabel-run NAME` computes one
+run into a shard under `<runs_dir>/lowlabel/<--lowlabel-shards>` (one SLURM job per
+run, see `slurm/lowlabel.sbatch`); without it the shards of all runs `PREFIX_*` (or
+only those of `--lowlabel-lambda`) are aggregated into `--note`.
+
 With `--randomize-radius PREFIX`, the radius of z-space embeddings is randomized
 before k-NN, linear-probe and MLP classification of the STL-10 labels (bank:
 `stl10_train` dump, test set: `stl10_test` dump; z only; see
@@ -79,6 +85,7 @@ from lejepa_norm import reporting
 from lejepa_norm.eval import analysis
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
+from lejepa_norm.eval import lowlabel
 from lejepa_norm.eval import randomization
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
@@ -119,6 +126,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="k-NN with randomized radius for runs PREFIX_* (needs --config).",
     )
     mode.add_argument(
+        "--lowlabel",
+        metavar="PREFIX",
+        help="E1 readers with a small labeled bank for runs PREFIX_* (needs "
+        "--config): with --lowlabel-run compute one run's shard, otherwise "
+        "aggregate the shards into --note.",
+    )
+    mode.add_argument(
         "--aggregate-controls",
         nargs="+",
         type=pathlib.Path,
@@ -147,6 +161,20 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="With --sigreg-power: shard directory name under <runs_dir>/sigreg_power.",
     )
     parser.add_argument(
+        "--lowlabel-run",
+        help="With --lowlabel: compute only this run into its shard.",
+    )
+    parser.add_argument(
+        "--lowlabel-lambda",
+        type=float,
+        help="With --lowlabel: aggregate only the runs of this lambda.",
+    )
+    parser.add_argument(
+        "--lowlabel-shards",
+        default="default",
+        help="With --lowlabel: shard directory name under <runs_dir>/lowlabel.",
+    )
+    parser.add_argument(
         "--runs-prefix",
         help="With --sigreg-power: also analyze the real z of runs PREFIX_*.",
     )
@@ -169,7 +197,11 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--run-name requires --config")
     if args.sigreg_power and args.config is None:
         parser.error("--sigreg-power requires --config")
-    if args.note is None and not (args.power_unit or args.power_list_units):
+    if args.lowlabel is not None and args.config is None:
+        parser.error("--lowlabel requires --config")
+    if args.note is None and not (
+        args.power_unit or args.power_list_units or args.lowlabel_run
+    ):
         parser.error("--note is required")
     if args.randomize_radius is not None and args.config is None:
         parser.error("--randomize-radius requires --config")
@@ -509,6 +541,167 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
     return 0
 
 
+def _lowlabel_figures(
+    runs: list[lowlabel.RunBudgets],
+    comparisons: list[lowlabel.BudgetComparison],
+    lam: float,
+    note: pathlib.Path,
+    chrome: pathlib.Path | None,
+) -> list[str]:
+    """Per reader: accuracy vs labels (retrained protocol) and paired change."""
+    prefix = note.parent / f"{note.stem}"
+    links: list[str] = []
+    for reader in lowlabel.READERS:
+        slug = "".join(ch if ch.isalnum() else "_" for ch in reader.split(" (")[0])
+        acc: dict[str, plotting.Series] = {}
+        for condition in randomization.CONDITIONS:
+            x, y, sd = lowlabel.accuracy_curve(
+                runs, lam, reader, randomization.RETRAIN, condition
+            )
+            acc[condition] = plotting.Series(
+                x=x,
+                y=[100 * v for v in y],
+                low=[100 * (v - s) for v, s in zip(y, sd, strict=True)],
+                high=[100 * (v + s) for v, s in zip(y, sd, strict=True)],
+            )
+        fig = plotting.line_plot(
+            acc,
+            f"Accuracy vs labels, {reader}, lambda={lam:g} (retrained; bars: sd over "
+            "subsets)",
+            "labeled images (log scale)",
+            "test accuracy (%)",
+            log_x=True,
+        )
+        out = plotting.export_png(fig, f"{prefix}_accuracy_{slug}.png", chrome)
+        links.append(reporting.image_link(out, note, f"accuracy vs labels, {reader}"))
+        change: dict[str, plotting.Series] = {}
+        for protocol in randomization.PROTOCOLS:
+            for condition in randomization.CONDITIONS[1:]:
+                if (
+                    protocol == randomization.FROZEN
+                    and condition == randomization.CONSTANT
+                ):
+                    continue  # collapses to chance: a distribution-shift artifact
+                rows = [
+                    b
+                    for b in comparisons
+                    if b.comparison.lam == lam
+                    and b.comparison.reader == reader
+                    and b.comparison.protocol == protocol
+                    and b.comparison.condition == condition
+                ]
+                change[f"{condition} ({protocol})"] = plotting.Series(
+                    x=[b.num_labels for b in rows],
+                    y=[100 * b.comparison.difference for b in rows],
+                    low=[100 * b.comparison.ci95[0] for b in rows],
+                    high=[100 * b.comparison.ci95[1] for b in rows],
+                )
+        fig = plotting.line_plot(
+            change,
+            f"Accuracy change vs baseline, {reader}, lambda={lam:g} (95% CI, test "
+            "images)",
+            "labeled images (log scale)",
+            "accuracy change (points)",
+            reference=0.0,
+            log_x=True,
+        )
+        out = plotting.export_png(fig, f"{prefix}_change_{slug}.png", chrome)
+        links.append(reporting.image_link(out, note, f"accuracy change, {reader}"))
+    return links
+
+
+def _run_lowlabel(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    shard_dir = locations.runs_dir / "lowlabel" / args.lowlabel_shards
+    if args.lowlabel_run is not None:
+        name = args.lowlabel_run
+        bank = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, name, dumps.STL10_TRAIN)
+        )
+        query = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, name, dumps.STL10_TEST)
+        )
+        if bank is None or query is None:
+            raise FileNotFoundError(f"missing stl10_train/stl10_test dump for {name}")
+        results = lowlabel.evaluate_run(
+            randomization.center_embeddings(bank.z),
+            bank.label,
+            randomization.center_embeddings(query.z),
+            query.label,
+            k=cfg.eval.knn_k,
+            num_repeats=cfg.eval.num_randomizations,
+            cv_folds=cfg.eval.cv_folds,
+            seed=cfg.seed,
+            num_subsets=cfg.eval.lowlabel_subsets,
+            log=lambda message: print(f"{name}: {message}", file=sys.stderr),
+        )
+        lowlabel.save_run(shard_dir / f"{name}.npz", results)
+        print(f"wrote {shard_dir / f'{name}.npz'}")
+        return 0
+    loaded: list[lowlabel.RunBudgets] = []
+    for run in sweep.load_runs(locations.runs_dir, args.lowlabel):
+        if args.lowlabel_lambda is not None and run.lam != args.lowlabel_lambda:
+            continue
+        shard = shard_dir / f"{run.name}.npz"
+        if not shard.exists():
+            raise FileNotFoundError(f"missing shard {shard}")
+        loaded.append(
+            lowlabel.RunBudgets(run.name, run.lam, run.seed, lowlabel.load_run(shard))
+        )
+    if not loaded:
+        print(f"no run named {args.lowlabel}_* selected", file=sys.stderr)
+        return 1
+    margin = cfg.eval.equivalence_margin
+    comparisons = lowlabel.compare(
+        loaded, margin, cfg.eval.num_bootstrap, numpy.random.default_rng(cfg.seed)
+    )
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.lowlabel_comparison",
+        "### Paired accuracy change vs the baseline, per lambda and label budget\n\n"
+        "z-space, center views; labeled bank = a class-balanced random subset of "
+        "STL-10 train, test set = STL-10 test; the same transformation is applied "
+        "to bank and test set independently. Differences are in accuracy points "
+        "(condition minus baseline on the same test images and the same subsets), "
+        "averaged over training seeds and subsets. `90% CI, test images`: paired "
+        f"bootstrap ({cfg.eval.num_bootstrap} replicates, test images resampled "
+        "within each seed), conditional on the drawn subsets. `subset SE`: standard "
+        "error of the mean paired difference over subsets. Verdicts, with the "
+        f"equivalence margin set to ±{100 * margin:g} points before looking at "
+        "results: `equivalent` if the 90% interval (TOST at 5%) lies inside the "
+        "margin, `different` if not equivalent and the 95% interval excludes 0, "
+        "otherwise `inconclusive`; `(with subsets)` adds the subset SE in "
+        "quadrature to the bootstrap SE (normal approximation).\n\n"
+        + reporting.markdown_table(lowlabel.comparison_rows(comparisons)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.lowlabel_accuracy",
+        "### Accuracy per label budget\n\n"
+        + reporting.markdown_table(lowlabel.accuracy_rows(loaded)),
+    )
+    reporting.update_section(
+        note,
+        "analyze.lowlabel_hyper",
+        "### Hyperparameters selected by cross-validation inside each subset\n\n"
+        "Linear probe: inverse regularization C; MLP: weight decay.\n\n"
+        + reporting.markdown_table(lowlabel.hyper_rows(loaded)),
+    )
+    if not args.no_figures:
+        links: list[str] = []
+        for lam in sorted({r.lam for r in loaded}):
+            links += _lowlabel_figures(
+                loaded, comparisons, lam, note, locations.kaleido_chrome
+            )
+        reporting.update_section(
+            note, "analyze.lowlabel_figures", "### Figures\n\n" + "\n\n".join(links)
+        )
+    print(f"wrote {note}")
+    return 0
+
+
 def _run_aggregate_controls(args: argparse.Namespace) -> int:
     locations = paths.load_paths()
     by_lambda: dict[float, list[list[dict[str, str]]]] = {}
@@ -786,6 +979,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_sweep(args)
     if args.randomize_radius is not None:
         return _run_randomize_radius(args)
+    if args.lowlabel is not None:
+        return _run_lowlabel(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
     if args.sigreg_power:

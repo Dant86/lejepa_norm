@@ -116,6 +116,8 @@ class EvalConfig:
     # Equivalence margin (accuracy units, 0.005 = 0.5 points) of the same study;
     # fixed before the results were looked at.
     equivalence_margin: float = 0.005
+    # Random labeled subsets per budget in the low-label study (`analyze --lowlabel`).
+    lowlabel_subsets: int = 10
 
 
 @dataclasses.dataclass

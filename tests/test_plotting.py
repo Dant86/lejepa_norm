@@ -40,3 +40,10 @@ def test_figures_render_to_png(tmp_path: pathlib.Path) -> None:
         plotting.radius_histogram(r, 256, "radius"), tmp_path / "hist.png", chrome
     )
     assert out.read_bytes().startswith(b"\x89PNG")
+
+
+def test_line_plot_can_use_a_logarithmic_x_axis() -> None:
+    series = {"a": plotting.Series(x=[50, 500, 5000], y=[1.0, 2.0, 3.0])}
+    log = plotting.line_plot(series, "t", "x", "y", log_x=True)
+    assert log.layout.xaxis.type == "log"
+    assert plotting.line_plot(series, "t", "x", "y").layout.xaxis.type is None

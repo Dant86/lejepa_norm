@@ -174,6 +174,7 @@ def line_plot(
     x_title: str,
     y_title: str,
     reference: float | None = None,
+    log_x: bool = False,
 ) -> go.Figure:
     """Lines with markers and optional CI error bars (e.g. metric vs severity).
 
@@ -183,11 +184,14 @@ def line_plot(
         x_title: X axis title.
         y_title: Y axis title.
         reference: Optional horizontal reference line (e.g. kappa = 1).
+        log_x: Logarithmic x axis.
 
     Returns:
         The figure.
     """
     fig = _figure(title, x_title, y_title)
+    if log_x:
+        fig.update_xaxes(type="log")
     for i, (name, s) in enumerate(series.items()):
         color, dash = _style(i)
         error_y = None
