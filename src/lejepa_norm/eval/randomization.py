@@ -542,6 +542,29 @@ def verdict(ci90: tuple[float, float], ci95: tuple[float, float], margin: float)
     return INCONCLUSIVE
 
 
+def paired_bootstrap_intervals(
+    diffs: collections.abc.Sequence[FloatArray],
+    draws: collections.abc.Sequence[IntArray],
+) -> tuple[float, float, float, float]:
+    """90% and 95% percentile intervals of the seed-averaged mean paired difference.
+
+    Args:
+        diffs: Per seed, the per-unit (test image / query) paired differences.
+        draws: Per seed, the bootstrap resample indices `(num_bootstrap, units)`
+            (one resample per seed, shared by all comparisons of that seed).
+
+    Returns:
+        `(lo90, hi90, lo95, hi95)`.
+    """
+    boot = numpy.mean(
+        [d[idx].mean(axis=1) for d, idx in zip(diffs, draws, strict=True)], axis=0
+    )
+    lo90, hi90, lo95, hi95 = (
+        float(v) for v in numpy.quantile(boot, [0.05, 0.95, 0.025, 0.975])
+    )
+    return lo90, hi90, lo95, hi95
+
+
 def compare(
     results: list[RunResult],
     margin: float,
@@ -584,17 +607,7 @@ def compare(
                         c.correct - b.correct
                         for c, b in zip(cells, base_cells, strict=True)
                     ]
-                    boot = numpy.mean(
-                        [
-                            d[idx].mean(axis=1)
-                            for d, idx in zip(diffs, draws, strict=True)
-                        ],
-                        axis=0,
-                    )
-                    lo90, hi90, lo95, hi95 = (
-                        float(v)
-                        for v in numpy.quantile(boot, [0.05, 0.95, 0.025, 0.975])
-                    )
+                    lo90, hi90, lo95, hi95 = paired_bootstrap_intervals(diffs, draws)
                     base = statistics.fmean(float(b.correct.mean()) for b in base_cells)
                     acc = statistics.fmean(float(c.correct.mean()) for c in cells)
                     out.append(

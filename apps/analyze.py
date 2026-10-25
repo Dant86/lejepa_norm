@@ -36,6 +36,14 @@ runs missing a dump are listed in the note, not dropped silently. The note gets
 paired-bootstrap differences against the unmodified baseline with an equivalence
 verdict (margin `eval.equivalence_margin`), accuracy tables and figures.
 
+With `--retrieval PREFIX`, Euclidean retrieval of z (class-level on the STL-10 center
+views, instance-level view-to-view on the augmented global views; see
+`lejepa_norm.eval.retrieval`) is evaluated under the radius conditions of the
+randomization study. `--retrieval-run NAME` computes one run's per-query metrics
+into a shard under `<runs_dir>/radius_usage_retrieval` (one SLURM job per run, GPU
+if available); without it the shards of all runs `PREFIX_*` are aggregated into
+the note (paired bootstrap + TOST per lambda, margin `eval.retrieval_margin`).
+
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
 `LEJEPA_NORM_RUNS_DIR/<run-name>/`), then writes markdown tables into generated
@@ -58,6 +66,10 @@ Examples:
     python apps/analyze.py --config configs/base.yaml \
         --randomize-radius radius_marginal \
         --note radius_randomization/radius_randomization.md
+    python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
+        --retrieval-run radius_marginal_lam0.05_s0
+    python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
+        --note radius_usage/retrieval_summary.md
 """
 
 import argparse
@@ -80,6 +92,7 @@ from lejepa_norm.eval import analysis
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import randomization
+from lejepa_norm.eval import retrieval
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
 from lejepa_norm.eval import sweep
@@ -119,6 +132,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="k-NN with randomized radius for runs PREFIX_* (needs --config).",
     )
     mode.add_argument(
+        "--retrieval",
+        metavar="PREFIX",
+        help="Euclidean retrieval of z under the radius conditions for runs "
+        "PREFIX_* (needs --config); with --retrieval-run computes one run's shard, "
+        "without it aggregates the shards into --note.",
+    )
+    mode.add_argument(
         "--aggregate-controls",
         nargs="+",
         type=pathlib.Path,
@@ -130,6 +150,11 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "--sigreg-power",
         action="store_true",
         help="Synthetic SIGReg power study (needs --config).",
+    )
+    parser.add_argument(
+        "--retrieval-run",
+        help="With --retrieval: compute only this run's per-query shard "
+        "(<runs_dir>/radius_usage_retrieval/<run>.npz; GPU if available).",
     )
     parser.add_argument(
         "--power-unit",
@@ -169,7 +194,11 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--run-name requires --config")
     if args.sigreg_power and args.config is None:
         parser.error("--sigreg-power requires --config")
-    if args.note is None and not (args.power_unit or args.power_list_units):
+    if args.retrieval is not None and args.config is None:
+        parser.error("--retrieval requires --config")
+    if args.note is None and not (
+        args.power_unit or args.power_list_units or args.retrieval_run
+    ):
         parser.error("--note is required")
     if args.randomize_radius is not None and args.config is None:
         parser.error("--randomize-radius requires --config")
@@ -509,6 +538,138 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
     return 0
 
 
+RETRIEVAL_SHARDS = "radius_usage_retrieval"
+
+
+def _retrieval_figures(
+    comparisons: list[retrieval.Comparison],
+    note: pathlib.Path,
+    chrome: pathlib.Path | None,
+) -> list[str]:
+    """One figure per task (mAP or recall@1): paired change vs lambda, 95% CIs."""
+    prefix = note.parent / note.stem
+    links: list[str] = []
+    for task in retrieval.TASKS:
+        metric = retrieval.task_metrics(task)[0]
+        series: dict[str, plotting.Series] = {}
+        for condition in retrieval.task_conditions(task)[1:]:
+            rows = [
+                c
+                for c in comparisons
+                if c.task == task and c.metric == metric and c.condition == condition
+            ]
+            series[condition] = plotting.Series(
+                x=[c.lam for c in rows],
+                y=[100 * c.difference for c in rows],
+                low=[100 * c.ci95[0] for c in rows],
+                high=[100 * c.ci95[1] for c in rows],
+            )
+        fig = plotting.line_plot(
+            series,
+            f"{metric} change vs baseline, {retrieval.TASK_TITLES[task]} "
+            "(z, 95% paired CI)",
+            "lambda",
+            f"{metric} change (points)",
+            reference=0.0,
+        )
+        out = plotting.export_png(
+            fig, f"{prefix}_{task}_{metric.replace('@', 'at')}.png", chrome
+        )
+        links.append(reporting.image_link(out, note, f"{metric} change, {task}"))
+    return links
+
+
+def _run_retrieval(args: argparse.Namespace) -> int:
+    """Retrieval study: one run's shard (`--retrieval-run`) or the aggregate note."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stderr
+    )
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    shard_dir = locations.runs_dir / RETRIEVAL_SHARDS
+    runs = sweep.load_runs(locations.runs_dir, args.retrieval)
+    if args.retrieval_run is not None:
+        run = next((r for r in runs if r.name == args.retrieval_run), None)
+        if run is None:
+            raise ValueError(f"no run {args.retrieval_run!r} under {args.retrieval}_*")
+        train = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, run.name, dumps.STL10_TRAIN)
+        )
+        test = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, run.name, dumps.STL10_TEST)
+        )
+        if train is None or test is None:
+            raise FileNotFoundError(f"{run.name}: needs stl10_train and stl10_test")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("%s on %s", run.name, device)
+        result = retrieval.evaluate_shards(
+            run.name, run.lam, cfg.seed, train, test, cfg.eval, device
+        )
+        logger.info("wrote %s", retrieval.save_result(shard_dir, result))
+        return 0
+    results = [
+        retrieval.load_result(shard_dir / f"{r.name}.npz")
+        for r in runs
+        if (shard_dir / f"{r.name}.npz").exists()
+    ]
+    missing = [r.name for r in runs if not (shard_dir / f"{r.name}.npz").exists()]
+    if not results:
+        print(f"no retrieval shards for {args.retrieval}_*", file=sys.stderr)
+        return 1
+    margin = cfg.eval.retrieval_margin
+    comparisons = retrieval.compare(
+        results, margin, cfg.eval.num_bootstrap, numpy.random.default_rng(cfg.seed)
+    )
+    note = locations.notes_dir / args.note
+    reporting.update_section(
+        note,
+        "analyze.retrieval_comparison",
+        "### Paired change vs the baseline, per lambda\n\n"
+        "z-space, Euclidean distance; differences in points (condition minus "
+        "baseline on the same queries, mAP / precision@k / recall@k in %), averaged "
+        "over training seeds; intervals are paired bootstrap percentile intervals "
+        f"({cfg.eval.num_bootstrap} replicates, queries resampled within each "
+        f"seed). Verdict with the margin fixed before the results at ±{100 * margin:g}"
+        " points: `equivalent` if the 90% interval lies inside the margin, "
+        "`different` if not and the 95% interval excludes 0, else `inconclusive`. "
+        f"Shuffle repeats ({cfg.eval.num_randomizations} per randomized condition) "
+        "are averaged per query and are not part of the interval.\n\n"
+        + reporting.markdown_table(retrieval.comparison_rows(comparisons)),
+    )
+    values = "".join(
+        f"#### {retrieval.TASK_TITLES[task]}\n\n"
+        + reporting.markdown_table(retrieval.value_rows(results, task))
+        + "\n\n"
+        for task in retrieval.TASKS
+    )
+    reporting.update_section(
+        note,
+        "analyze.retrieval_values",
+        "### Metric values (%), mean ± std over training seeds\n\n" + values.rstrip(),
+    )
+    reporting.update_section(
+        note,
+        "analyze.retrieval_r2",
+        "### Held-out R^2 of log-radius from direction (test center views)\n\n"
+        + reporting.markdown_table(
+            [
+                {"run": r.name, "lambda": r.lam, "seed": r.seed, "R^2": r.r2_test}
+                for r in sorted(results, key=lambda r: (r.lam, r.seed))
+            ]
+        )
+        + "\n\nRuns without a shard: "
+        + (", ".join(missing) if missing else "none")
+        + ".",
+    )
+    if not args.no_figures:
+        links = _retrieval_figures(comparisons, note, locations.kaleido_chrome)
+        reporting.update_section(
+            note, "analyze.retrieval_figures", "### Figures\n\n" + "\n\n".join(links)
+        )
+    print(f"wrote {note}")
+    return 0
+
+
 def _run_aggregate_controls(args: argparse.Namespace) -> int:
     locations = paths.load_paths()
     by_lambda: dict[float, list[list[dict[str, str]]]] = {}
@@ -786,6 +947,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_sweep(args)
     if args.randomize_radius is not None:
         return _run_randomize_radius(args)
+    if args.retrieval is not None:
+        return _run_retrieval(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
     if args.sigreg_power:
