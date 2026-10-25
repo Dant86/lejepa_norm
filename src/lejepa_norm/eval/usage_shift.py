@@ -232,7 +232,10 @@ def write_notes(
             "analyze.shift_inputs",
             "### Inputs\n\nRuns aggregated: "
             + ", ".join(
-                f"`{u.name}`" for u in [*cell_units, *ood_units] if u.lam == lam
+                f"`{n}`"
+                for n in sorted(
+                    {u.name for u in [*cell_units, *ood_units] if u.lam == lam}
+                )
             )
             + ".\n\nUnit files missing for this lambda:\n\n"
             + (reporting.markdown_table(mine) if mine else "None."),
