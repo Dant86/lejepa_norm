@@ -670,9 +670,8 @@ def _lowlabel_figures(
             )
         fig = plotting.line_plot(
             acc,
-            f"Accuracy vs labels, {reader}, lambda={lam:g} (retrained; bars: sd over "
-            "subsets)",
-            "labeled images (log scale)",
+            f"Accuracy vs labels, {reader}, lambda={lam:g}",
+            "labeled images (log scale; retrained; bars: sd over subsets)",
             "test accuracy (%)",
             log_x=True,
         )
@@ -702,9 +701,8 @@ def _lowlabel_figures(
                 )
         fig = plotting.line_plot(
             change,
-            f"Accuracy change vs baseline, {reader}, lambda={lam:g} (95% CI, test "
-            "images)",
-            "labeled images (log scale)",
+            f"Accuracy change vs baseline, {reader}, lambda={lam:g}",
+            "labeled images (log scale; bars: 95% CI over test images)",
             "accuracy change (points)",
             reference=0.0,
             log_x=True,

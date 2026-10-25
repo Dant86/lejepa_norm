@@ -191,7 +191,8 @@ def line_plot(
     """
     fig = _figure(title, x_title, y_title)
     if log_x:
-        fig.update_xaxes(type="log")
+        ticks = sorted({float(x) for s in series.values() for x in s.x})
+        fig.update_xaxes(type="log", tickvals=ticks, ticktext=[f"{t:g}" for t in ticks])
     for i, (name, s) in enumerate(series.items()):
         color, dash = _style(i)
         error_y = None
