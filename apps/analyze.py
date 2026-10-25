@@ -671,7 +671,7 @@ def _lowlabel_figures(
         fig = plotting.line_plot(
             acc,
             f"Accuracy vs labels, {reader}, lambda={lam:g}",
-            "labeled images (log scale; retrained; bars: sd over subsets)",
+            "labeled images (log scale)",
             "test accuracy (%)",
             log_x=True,
         )
@@ -702,7 +702,7 @@ def _lowlabel_figures(
         fig = plotting.line_plot(
             change,
             f"Accuracy change vs baseline, {reader}, lambda={lam:g}",
-            "labeled images (log scale; bars: 95% CI over test images)",
+            "labeled images (log scale)",
             "accuracy change (points)",
             reference=0.0,
             log_x=True,
@@ -808,7 +808,14 @@ def _run_lowlabel(args: argparse.Namespace) -> int:
                 loaded, comparisons, lam, note, locations.kaleido_chrome
             )
         reporting.update_section(
-            note, "analyze.lowlabel_figures", "### Figures\n\n" + "\n\n".join(links)
+            note,
+            "analyze.lowlabel_figures",
+            "### Figures\n\nPer reader and lambda: accuracy vs number of labeled "
+            "images (retrained protocol; mean over seeds and subsets, bars = "
+            "standard deviation over subsets), then the paired accuracy change vs "
+            "the baseline (bars = 95% paired bootstrap interval over test images; "
+            "the frozen constant-radius cell is omitted, it is at chance).\n\n"
+            + "\n\n".join(links),
         )
     print(f"wrote {note}")
     return 0
