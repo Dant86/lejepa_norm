@@ -10,6 +10,7 @@ preemption: [batch-jobs guide](https://cluster-policy.ds.uchicago.edu/using-the-
 | `train.sbatch` | `apps/train.py --resume auto` | 1 GPU | continues from `resume.pt` |
 | `embed.sbatch` | `apps/embed.py --resume` | 1 GPU | writes only missing shards |
 | `analyze.sbatch` | `apps/analyze.py` | CPU | recomputes (idempotent) |
+| `frozen_linear.sbatch` | `apps/analyze.py --frozen-linear` (array, one run per task) | CPU | skips finished shards |
 
 All templates request `--partition=general --qos=general --time=12:00:00`
 (the general QoS maximum) with `--signal=B:USR1@300 --requeue`, and launch the app
