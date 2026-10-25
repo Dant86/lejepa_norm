@@ -116,6 +116,12 @@ class EvalConfig:
     # Equivalence margin (accuracy units, 0.005 = 0.5 points) of the same study;
     # fixed before the results were looked at.
     equivalence_margin: float = 0.005
+    # Equivalence margin of the retrieval study (`analyze --retrieval`; mAP,
+    # precision@k and recall@k in 0-1 units, 0.005 = 0.5 points): the same size as
+    # the accuracy margin above, fixed before any retrieval result was computed.
+    retrieval_margin: float = 0.005
+    # Random labeled subsets per budget in the low-label study (`analyze --lowlabel`).
+    lowlabel_subsets: int = 10
 
 
 @dataclasses.dataclass

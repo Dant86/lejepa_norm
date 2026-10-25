@@ -305,6 +305,70 @@ class Evaluation:
     weight_decay: float
 
 
+def condition_cells(
+    fit: Fit,
+    bank: FloatArray,
+    query: FloatArray,
+    query_labels: IntArray,
+    model: RadiusModel,
+    num_repeats: int,
+    seed: int,
+) -> dict[tuple[str, str], Cell]:
+    """All protocols and conditions of one reader, as `(protocol, condition)` cells.
+
+    Args:
+        fit: The reader (bank features -> predictor).
+        bank: `(M, d)` labeled embeddings.
+        query: `(N, d)` test embeddings.
+        query_labels: `(N,)` integer labels.
+        model: Held-out direction -> log-radius predictions for `bank`/`query`.
+        num_repeats: Shuffles per randomized condition.
+        seed: Seed of the shuffles.
+
+    Returns:
+        Cells keyed by `(protocol, condition)` (the caller adds the reader).
+    """
+
+    def permute(
+        x: FloatArray, _predicted: FloatArray, rng: numpy.random.Generator
+    ) -> FloatArray:
+        return permute_radius(x, rng)
+
+    transforms: tuple[tuple[str, Transform], ...] = (
+        (PERMUTE, permute),
+        (RESIDUAL, residual_shuffle),
+    )
+    cells: dict[tuple[str, str], Cell] = {}
+
+    def store(protocol: str, condition: str, preds: list[IntArray]) -> None:
+        hits = numpy.stack([p == query_labels for p in preds]).astype(numpy.float64)
+        cells[protocol, condition] = Cell(
+            correct=hits.mean(axis=0),
+            repeat_accuracy=tuple(float(h.mean()) for h in hits),
+        )
+
+    clean = fit(bank)
+    for protocol in PROTOCOLS:
+        store(protocol, BASELINE, [clean(query)])
+    # Constant radius is deterministic: no repeats.
+    unit_query = constant_radius(query)
+    store(FROZEN, CONSTANT, [clean(unit_query)])
+    store(RETRAIN, CONSTANT, [fit(constant_radius(bank))(unit_query)])
+    for condition, transform in transforms:
+        frozen: list[IntArray] = []
+        retrained: list[IntArray] = []
+        for repeat in range(num_repeats):
+            # Independent streams for the bank and the test set of each repeat.
+            rng_bank = numpy.random.default_rng([seed, repeat, 0])
+            rng_query = numpy.random.default_rng([seed, repeat, 1])
+            shuffled_query = transform(query, model.query, rng_query)
+            frozen.append(clean(shuffled_query))
+            retrained.append(fit(transform(bank, model.bank, rng_bank))(shuffled_query))
+        store(FROZEN, condition, frozen)
+        store(RETRAIN, condition, retrained)
+    return cells
+
+
 def evaluate(
     bank: FloatArray,
     bank_labels: numpy.typing.ArrayLike,
@@ -341,49 +405,13 @@ def evaluate(
         select_weight_decay(bank, by, num_classes, seed) if MLP in readers else 0.0
     )
 
-    def permute(
-        x: FloatArray, _predicted: FloatArray, rng: numpy.random.Generator
-    ) -> FloatArray:
-        return permute_radius(x, rng)
-
-    transforms: tuple[tuple[str, Transform], ...] = (
-        (PERMUTE, permute),
-        (RESIDUAL, residual_shuffle),
-    )
     cells: dict[Key, Cell] = {}
-
-    def store(
-        reader: str, protocol: str, condition: str, preds: list[IntArray]
-    ) -> None:
-        hits = numpy.stack([p == qy for p in preds]).astype(numpy.float64)
-        cells[reader, protocol, condition] = Cell(
-            correct=hits.mean(axis=0),
-            repeat_accuracy=tuple(float(h.mean()) for h in hits),
-        )
-
     for reader in readers:
         fit = make_fit(reader, by, k, num_classes, seed, weight_decay)
-        clean = fit(bank)
-        for protocol in PROTOCOLS:
-            store(reader, protocol, BASELINE, [clean(query)])
-        # Constant radius is deterministic: no repeats.
-        unit_query = constant_radius(query)
-        store(reader, FROZEN, CONSTANT, [clean(unit_query)])
-        store(reader, RETRAIN, CONSTANT, [fit(constant_radius(bank))(unit_query)])
-        for condition, transform in transforms:
-            frozen: list[IntArray] = []
-            retrained: list[IntArray] = []
-            for repeat in range(num_repeats):
-                # Independent streams for the bank and the test set of each repeat.
-                rng_bank = numpy.random.default_rng([seed, repeat, 0])
-                rng_query = numpy.random.default_rng([seed, repeat, 1])
-                shuffled_query = transform(query, model.query, rng_query)
-                frozen.append(clean(shuffled_query))
-                retrained.append(
-                    fit(transform(bank, model.bank, rng_bank))(shuffled_query)
-                )
-            store(reader, FROZEN, condition, frozen)
-            store(reader, RETRAIN, condition, retrained)
+        for (protocol, condition), cell in condition_cells(
+            fit, bank, query, qy, model, num_repeats, seed
+        ).items():
+            cells[reader, protocol, condition] = cell
 
     rho_bank, rho_query = features.log_radius(bank), features.log_radius(query)
     diagnostics: list[Row] = [
@@ -542,11 +570,47 @@ def verdict(ci90: tuple[float, float], ci95: tuple[float, float], margin: float)
     return INCONCLUSIVE
 
 
+def bootstrap_draws(
+    num_images: int, num_seeds: int, num_bootstrap: int, rng: numpy.random.Generator
+) -> list[IntArray]:
+    """One `(num_bootstrap, num_images)` image resample per training seed."""
+    return [
+        rng.integers(0, num_images, size=(num_bootstrap, num_images))
+        for _ in range(num_seeds)
+    ]
+
+
+def bootstrap_seed_mean(
+    draws: collections.abc.Sequence[IntArray],
+    statistic: collections.abc.Callable[[int, IntArray], FloatArray],
+) -> FloatArray:
+    """Replicates of a per-seed statistic averaged over the training seeds.
+
+    Args:
+        draws: Image resamples per seed (`bootstrap_draws`).
+        statistic: `(seed_index, resample_indices) -> (num_bootstrap,)`, the
+            statistic of that seed on every resample.
+
+    Returns:
+        `(num_bootstrap,)` mean over seeds of the statistic.
+    """
+    return numpy.mean([statistic(s, idx) for s, idx in enumerate(draws)], axis=0)
+
+
+def intervals(boot: FloatArray) -> tuple[tuple[float, float], tuple[float, float]]:
+    """The 90% and 95% percentile intervals of bootstrap replicates."""
+    lo90, hi90, lo95, hi95 = (
+        float(v) for v in numpy.quantile(boot, [0.05, 0.95, 0.025, 0.975])
+    )
+    return (lo90, hi90), (lo95, hi95)
+
+
 def compare(
     results: list[RunResult],
     margin: float,
     num_bootstrap: int,
     rng: numpy.random.Generator,
+    readers: tuple[str, ...] = READERS,
 ) -> list[Comparison]:
     """Paired bootstrap differences vs. the baseline, per lambda.
 
@@ -559,6 +623,7 @@ def compare(
         margin: Equivalence margin in accuracy units (0.005 = 0.5 points).
         num_bootstrap: Bootstrap replicates.
         rng: Generator for the resamples.
+        readers: Readers to compare (every run's cells must hold all of them).
 
     Returns:
         One `Comparison` per lambda, reader, protocol and non-baseline condition.
@@ -568,10 +633,8 @@ def compare(
         group = sorted((r for r in results if r.lam == lam), key=lambda r: r.seed)
         num_images = next(iter(group[0].evaluation.cells.values())).correct.size
         # One resample per seed, shared by every comparison of that seed.
-        draws = [
-            rng.integers(0, num_images, size=(num_bootstrap, num_images)) for _ in group
-        ]
-        for reader in READERS:
+        draws = bootstrap_draws(num_images, len(group), num_bootstrap, rng)
+        for reader in readers:
             for protocol in PROTOCOLS:
                 base_cells = [
                     r.evaluation.cells[reader, protocol, BASELINE] for r in group
@@ -584,16 +647,10 @@ def compare(
                         c.correct - b.correct
                         for c, b in zip(cells, base_cells, strict=True)
                     ]
-                    boot = numpy.mean(
-                        [
-                            d[idx].mean(axis=1)
-                            for d, idx in zip(diffs, draws, strict=True)
-                        ],
-                        axis=0,
-                    )
-                    lo90, hi90, lo95, hi95 = (
-                        float(v)
-                        for v in numpy.quantile(boot, [0.05, 0.95, 0.025, 0.975])
+                    ci90, ci95 = intervals(
+                        bootstrap_seed_mean(
+                            draws, lambda s, idx, d=diffs: d[s][idx].mean(axis=1)
+                        )
                     )
                     base = statistics.fmean(float(b.correct.mean()) for b in base_cells)
                     acc = statistics.fmean(float(c.correct.mean()) for c in cells)
@@ -607,9 +664,9 @@ def compare(
                             baseline=base,
                             accuracy=acc,
                             difference=acc - base,
-                            ci90=(lo90, hi90),
-                            ci95=(lo95, hi95),
-                            verdict=verdict((lo90, hi90), (lo95, hi95), margin),
+                            ci90=ci90,
+                            ci95=ci95,
+                            verdict=verdict(ci90, ci95, margin),
                         )
                     )
     return out
