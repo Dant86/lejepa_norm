@@ -1,7 +1,7 @@
 # E2 (part 1): is the radius-direction redundancy specific to trained LeJEPA? Random-init baseline
-- **Branch / version:** `radius-baselines-controls` @ `<commit>` (filled in with the results commit; the reading below was committed before any job was submitted)
-- **Run datetime (UTC):** <filled in with the results>
-- **Command(s):** <filled in with the results>
+- **Branch / version:** `radius-baselines-controls` @ `567c498` (code and pre-registered readings; this results commit follows it)
+- **Run datetime (UTC):** 2026-10-26 (jobs started 2026-10-26T01:11Z by sacct; aggregation 2026-10-26T02:11Z)
+- **Command(s):** `sbatch --export=ALL --array=0-5 slurm/embed_random_init.sbatch configs/base.yaml` (job 2247669, random-init embeddings, 1 GPU each, node r003: NVIDIA H200); `sbatch --export=ALL --array=0-14%8 slurm/baseline_controls.sbatch configs/base.yaml radius_marginal random_init` (job 2247779, CPU only, nodes m002/g002/h001); aggregation: `python apps/analyze.py --config configs/base.yaml --baseline-controls radius_marginal random_init --note radius_baselines/controls.md` (writes `controls_redundancy.md`, `controls_smooth.md`, `controls_curve.md`)
 - **Datasets:** STL-10 `test` (first 4000 images after the seeded subsample used by every redundancy table) clean images ([canonical](https://cs.stanford.edu/~acoates/stl10/), [HF `tanganke/stl10`](https://huggingface.co/datasets/tanganke/stl10)); the canonical archive was used (via the existing `stl10_test` embedding dumps); the HF page is linked for reference only. BatchNorm calibration of the random-init networks uses STL-10 `unlabeled` + `train` images (same canonical archive, no labels).
 - **Backbone:** ResNet-18 + 2048-2048-256 projector from scratch ([HF architecture reference](https://huggingface.co/timm/resnet18.a1_in1k), weights not used) in three flavors: trained (`last.pt` of `radius_marginal_lam{0.02,0.05,0.1}_s{0,1,2}`), random-init with calibrated BatchNorm statistics (`random_init_bncal_s{0,1,2}`) and random-init with identity BatchNorm (`random_init_bnid_s{0,1,2}`).
 - **Scope:** h is not analyzed; LeJEPA's product is z.
@@ -32,6 +32,80 @@ Decision variable: same-view R^2 of z (the 0.95 headline); the disjoint-halves R
 
 ## Results
 
+<!-- BEGIN GENERATED: baseline.controls -->
+### Redundancy controls per group (z)
+
+Held-out nested-CV kernel-ridge R^2 of the radius from the direction on the first 4000 `stl10_test` images, mean over the seeds of a group; the interval is a 95% percentile bootstrap over images (resampled within each seed, then averaged over seeds). `null max`, `worst permutation p` (500 permutations) and `min F` are the least favorable value over seeds.
+
+| group | setup | seeds | r2 (mean over seeds) | 95% CI (images) | seed range | null max | worst permutation p | min F |
+|---|---|---|---|---|---|---|---|---|
+| radius_marginal_lam0.02 | same views (all 8): rho_bar ~ u_hat | 3 | 0.9484 | [0.9449, 0.9516] | [0.9471, 0.9506] | 0.003696 | 0.001996 | 247 |
+| radius_marginal_lam0.02 | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 3 | 0.886 | [0.8809, 0.8909] | [0.8785, 0.8917] | 0.002259 | 0.001996 | 119.7 |
+| radius_marginal_lam0.02 | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 3 | 0.8824 | [0.8771, 0.8874] | [0.8737, 0.8872] | 0.003458 | 0.001996 | 119.7 |
+| radius_marginal_lam0.02 | single view, same view: rho_0 ~ u_0 | 3 | 0.9313 | [0.9275, 0.9347] | [0.9303, 0.9329] | 0.002497 | 0.001996 | 164.1 |
+| radius_marginal_lam0.02 | single view, other view: rho_1 ~ u_0 | 3 | 0.7425 | [0.7330, 0.7516] | [0.7296, 0.7567] | 0.004018 | 0.001996 | 47.65 |
+| radius_marginal_lam0.02 | reference: split-half reliability r^2 of rho_bar | 3 | 0.9415 |  | [0.9385, 0.9447] |  |  |  |
+| radius_marginal_lam0.05 | same views (all 8): rho_bar ~ u_hat | 3 | 0.9467 | [0.9441, 0.9491] | [0.9459, 0.9484] | 0.002633 | 0.001996 | 72.19 |
+| radius_marginal_lam0.05 | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 3 | 0.8612 | [0.8560, 0.8665] | [0.8572, 0.8654] | 0.002686 | 0.001996 | 54.69 |
+| radius_marginal_lam0.05 | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 3 | 0.8602 | [0.8548, 0.8658] | [0.8546, 0.8664] | 0.003703 | 0.001996 | 55.33 |
+| radius_marginal_lam0.05 | single view, same view: rho_0 ~ u_0 | 3 | 0.9182 | [0.9147, 0.9218] | [0.9176, 0.9189] | 0.004124 | 0.001996 | 51.65 |
+| radius_marginal_lam0.05 | single view, other view: rho_1 ~ u_0 | 3 | 0.6979 | [0.6873, 0.7078] | [0.6913, 0.7083] | 0.004897 | 0.001996 | 29.08 |
+| radius_marginal_lam0.05 | reference: split-half reliability r^2 of rho_bar | 3 | 0.9286 |  | [0.9276, 0.9304] |  |  |  |
+| radius_marginal_lam0.1 | same views (all 8): rho_bar ~ u_hat | 3 | 0.9355 | [0.9331, 0.9380] | [0.9346, 0.9363] | 0.003358 | 0.001996 | 49.82 |
+| radius_marginal_lam0.1 | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 3 | 0.8381 | [0.8322, 0.8439] | [0.8347, 0.8402] | 0.002058 | 0.001996 | 40.9 |
+| radius_marginal_lam0.1 | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 3 | 0.8363 | [0.8301, 0.8421] | [0.8350, 0.8377] | 0.0044 | 0.001996 | 39.68 |
+| radius_marginal_lam0.1 | single view, same view: rho_0 ~ u_0 | 3 | 0.8992 | [0.8953, 0.9028] | [0.8957, 0.9010] | 0.006754 | 0.001996 | 36.55 |
+| radius_marginal_lam0.1 | single view, other view: rho_1 ~ u_0 | 3 | 0.6516 | [0.6390, 0.6631] | [0.6425, 0.6577] | 0.004319 | 0.001996 | 23 |
+| radius_marginal_lam0.1 | reference: split-half reliability r^2 of rho_bar | 3 | 0.9185 |  | [0.9177, 0.9194] |  |  |  |
+| random_init_bncal | same views (all 8): rho_bar ~ u_hat | 3 | 0.9726 | [0.9714, 0.9736] | [0.9697, 0.9767] | 0.002333 | 0.001996 | 294.9 |
+| random_init_bncal | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 3 | 0.3657 | [0.3508, 0.3798] | [0.3421, 0.3797] | 0.002191 | 0.001996 | 9.553 |
+| random_init_bncal | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 3 | 0.3779 | [0.3646, 0.3917] | [0.3531, 0.3910] | 0.003022 | 0.001996 | 10.06 |
+| random_init_bncal | single view, same view: rho_0 ~ u_0 | 3 | 0.9651 | [0.9636, 0.9665] | [0.9580, 0.9713] | 0.003526 | 0.001996 | 193.6 |
+| random_init_bncal | single view, other view: rho_1 ~ u_0 | 3 | 0.1013 | [0.0897, 0.1119] | [0.0867, 0.1192] | 0.005228 | 0.001996 | 2.946 |
+| random_init_bncal | reference: split-half reliability r^2 of rho_bar | 3 | 0.3496 |  | [0.3256, 0.3634] |  |  |  |
+| random_init_bnid | same views (all 8): rho_bar ~ u_hat | 3 | 0.9993 | [0.9992, 0.9993] | [0.9989, 0.9995] | 0.003912 | 0.001996 | 1.575e+04 |
+| random_init_bnid | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 3 | 0.4023 | [0.3828, 0.4193] | [0.3651, 0.4272] | 0.003023 | 0.001996 | 10.67 |
+| random_init_bnid | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 3 | 0.4025 | [0.3846, 0.4197] | [0.3678, 0.4303] | 0.002618 | 0.001996 | 11.11 |
+| random_init_bnid | single view, same view: rho_0 ~ u_0 | 3 | 0.9998 | [0.9997, 0.9998] | [0.9996, 0.9999] | 0.002361 | 0.001996 | 5.681e+04 |
+| random_init_bnid | single view, other view: rho_1 ~ u_0 | 3 | 0.1157 | [0.1009, 0.1295] | [0.0977, 0.1276] | 0.002584 | 0.001996 | 2.793 |
+| random_init_bnid | reference: split-half reliability r^2 of rho_bar | 3 | 0.386 |  | [0.3536, 0.4136] |  |  |  |
+<!-- END GENERATED: baseline.controls -->
+
+<!-- BEGIN GENERATED: baseline.contrast -->
+### R^2 minus the `random_init_bncal` group
+
+Same held-out images, so the resamples are shared by image; 95% percentile bootstrap, seeds averaged within each group.
+
+| group | minus | setup | difference in r2 | 95% CI (images) |
+|---|---|---|---|---|
+| radius_marginal_lam0.02 | random_init_bncal | same views (all 8): rho_bar ~ u_hat | -0.02423 | [-0.0304, -0.0190] |
+| radius_marginal_lam0.02 | random_init_bncal | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 0.5203 | [0.4957, 0.5450] |
+| radius_marginal_lam0.02 | random_init_bncal | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 0.5044 | [0.4806, 0.5280] |
+| radius_marginal_lam0.02 | random_init_bncal | single view, same view: rho_0 ~ u_0 | -0.03378 | [-0.0395, -0.0285] |
+| radius_marginal_lam0.02 | random_init_bncal | single view, other view: rho_1 ~ u_0 | 0.6411 | [0.6178, 0.6628] |
+| radius_marginal_lam0.05 | random_init_bncal | same views (all 8): rho_bar ~ u_hat | -0.02586 | [-0.0304, -0.0220] |
+| radius_marginal_lam0.05 | random_init_bncal | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 0.4955 | [0.4711, 0.5213] |
+| radius_marginal_lam0.05 | random_init_bncal | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 0.4823 | [0.4568, 0.5061] |
+| radius_marginal_lam0.05 | random_init_bncal | single view, same view: rho_0 ~ u_0 | -0.04684 | [-0.0526, -0.0413] |
+| radius_marginal_lam0.05 | random_init_bncal | single view, other view: rho_1 ~ u_0 | 0.5966 | [0.5750, 0.6177] |
+| radius_marginal_lam0.1 | random_init_bncal | same views (all 8): rho_bar ~ u_hat | -0.03708 | [-0.0414, -0.0331] |
+| radius_marginal_lam0.1 | random_init_bncal | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 0.4724 | [0.4497, 0.4989] |
+| radius_marginal_lam0.1 | random_init_bncal | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 0.4583 | [0.4349, 0.4832] |
+| radius_marginal_lam0.1 | random_init_bncal | single view, same view: rho_0 ~ u_0 | -0.06585 | [-0.0718, -0.0601] |
+| radius_marginal_lam0.1 | random_init_bncal | single view, other view: rho_1 ~ u_0 | 0.5502 | [0.5262, 0.5731] |
+| random_init_bnid | random_init_bncal | same views (all 8): rho_bar ~ u_hat | 0.02665 | [0.0253, 0.0280] |
+| random_init_bnid | random_init_bncal | disjoint halves: rho_bar(views 4-7) ~ u_hat(views 0-3) | 0.03657 | [0.0065, 0.0631] |
+| random_init_bnid | random_init_bncal | disjoint halves: rho_bar(views 0-3) ~ u_hat(views 4-7) | 0.0246 | [-0.0038, 0.0515] |
+| random_init_bnid | random_init_bncal | single view, same view: rho_0 ~ u_0 | 0.03468 | [0.0330, 0.0366] |
+| random_init_bnid | random_init_bncal | single view, other view: rho_1 ~ u_0 | 0.01439 | [-0.0068, 0.0346] |
+<!-- END GENERATED: baseline.contrast -->
+
 ## Interpretation
+
+Against the pre-registered reading (z only; trained group lambda 0.05, calibrated random-init as reference):
+
+- **Same-view R^2 says little about SIGReg (reading 1 met on its numeric criterion).** An untrained ResNet-18 + projector reaches same-view R^2 = 0.973 (calibrated BN, CI [0.971, 0.974]) and 0.999 (identity BN), against 0.947 for trained lambda 0.05. The trained-minus-random contrast is -0.026 [-0.030, -0.022] (lambda 0.02: -0.024, lambda 0.1: -0.037), inside +-0.05 and in fact slightly negative. The 0.95 headline is therefore a property of how norm and direction co-vary in this architecture (a within-view, deterministic map), not something SIGReg produces. BatchNorm mode changes the same-view value by 0.027 (< 0.1), so the calibrated group is the headline.
+- **But the pre-registered stricter check does not agree, so reading 1 is not clean.** Across disjoint view halves the random-init R^2 is 0.37 (trained 0.86; contrast +0.50 [+0.47, +0.52]); single view to another view 0.10 (trained 0.70); split-half reliability of the mean log-radius 0.35 (trained 0.93). In the random-init network the radius is predictable from the direction *of the same view* but is mostly view-specific noise across augmentations; in the trained network it is an image-level quantity (ICC 0.87 in the sweep) that is also predictable across views. What training creates is cross-view stability of the radius, not predictability from the direction.
+- Caveat: with three random-init seeds, only the image bootstrap enters the intervals (seed ranges are listed). Calibrated BN statistics come from augmented global views; the identity-BN group is a secondary bound. All on STL-10 / ResNet-18.
 
 ## Next steps
