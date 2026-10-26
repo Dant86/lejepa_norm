@@ -69,13 +69,25 @@ class ModelConfig:
 
 @dataclasses.dataclass
 class LossConfig:
-    """Loss settings; `variant` selects A (LeJEPA), B (SPHERE-JEPA) or C (Polar)."""
+    """Loss settings; `variant` selects A (LeJEPA), B (SPHERE-JEPA) or C (Polar).
 
-    variant: typing.Literal["A", "B", "C"] = "A"
+    `simclr`, `vicreg` and `supervised` are the E2 baselines
+    (`lejepa_norm.losses.baselines`); only the fields below that variant are used.
+    """
+
+    variant: typing.Literal["A", "B", "C", "simclr", "vicreg", "supervised"] = "A"
     lambda_: float = 0.05
     num_slices: int = 1024
     num_points: int = 17
     t_max: float = 3.0
+    # SimCLR (NT-Xent) temperature.
+    temperature: float = 0.2
+    # VICReg coefficients of the invariance, variance and covariance terms.
+    sim_coeff: float = 25.0
+    std_coeff: float = 25.0
+    cov_coeff: float = 1.0
+    # Supervised baseline: classes of the linear head on z.
+    num_classes: int = 10
 
 
 @dataclasses.dataclass
