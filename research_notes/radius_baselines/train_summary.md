@@ -41,6 +41,14 @@ Note on the generated tables: the shared analysis code groups runs by `loss.lamb
 
 **What this does not show.** One seed per baseline (unless the boundary rule triggers), one backbone, one temperature / coefficient set; R^2 calibration (random-init network, random smooth functions of the direction, learning curve in N) is E2 part 1 on `radius-baselines-controls` and is not repeated here.
 
+## Addendum (2026-10-26, written before any analysis of h; all z results above are unchanged)
+
+**Explicit exception to the z-only rule, scoped to the E2 baselines.** For SimCLR and VICReg the projector output z is discarded after training and the used representation is the backbone feature h; for the supervised run h is the penultimate feature. The quantity of interest for the baselines is therefore h. LeJEPA's product is still z; its h (`radius_marginal_lam0.05`) is included as a clearly labelled *secondary reference only*.
+
+**Hypothesis under test.** SimCLR's low z same-view R^2 (0.684) is low because z is not the representation used. If that is right, SimCLR's h same-view R^2 should be clearly higher (>= 0.85).
+
+**Readings, identical to those for z and fixed now:** same-view held-out R^2 (nested-CV kernel ridge, STL-10 test) >= 0.85 with a null near 0 = generic redundancy; <= 0.50 = not predictable; 0.50-0.85 = mixed. Randomization: margin 0.5 accuracy points, same verdicts, same conditions and readers. The more-seeds boundary rule is not re-applied (one seed each, stated). If h does not resolve the gap (SimCLR h still < 0.85), that is reported as such. Already seen before this addendum: the redundancy-controls tables generated for the z runs contained an h block (SimCLR h same-view R^2 0.869 in the generated table); it was not read at the time. This is disclosed so the h analysis is not mistaken for blind.
+
 ## Results
 
 Numbers are copied from the per-run notes (generated there by `analyze --redundancy-controls` and `--randomize-radius`); one seed each; z only.
