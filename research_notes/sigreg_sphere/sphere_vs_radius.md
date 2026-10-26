@@ -1,6 +1,6 @@
 # E3: training without the radius (SIGReg on the sphere) vs the matching radius runs
 - **Branch / version:** `sigreg-sphere` @ <commit> (see "Commands" for what each step used)
-- **Run datetime (UTC):** pre-registration committed 2026-10-26T00:55Z (before any training result or evaluation existed); results: <filled in below>
+- **Run datetime (UTC):** pre-registration committed 2026-10-26T00:50Z (before any training result or evaluation existed); results: <filled in below>
 - **Command(s):** <filled in below>
 - **Datasets:** STL-10 unlabeled (100k, pretraining), STL-10 `train`/`test` (bank / queries), STL-10-C (generated from `test`), DTD `test`, SVHN `test`. STL-10: [canonical](https://cs.stanford.edu/~acoates/stl10/), [HF `tanganke/stl10`](https://huggingface.co/datasets/tanganke/stl10); the **canonical Stanford archive was used** (via the prepared arrays), the HF page is linked for reference. DTD: [canonical](https://www.robots.ox.ac.uk/~vgg/data/dtd/), [HF `tanganke/dtd`](https://huggingface.co/datasets/tanganke/dtd). SVHN: [canonical](http://ufldl.stanford.edu/housenumbers/), [HF `ufldl-stanford/svhn`](https://huggingface.co/datasets/ufldl-stanford/svhn); the canonical archives (prepared arrays) were used.
 - **Backbone:** ResNet-18 from scratch ([HF architecture reference](https://huggingface.co/timm/resnet18.a1_in1k), weights not used), projector 512 -> 2048 -> 2048 -> 256.
