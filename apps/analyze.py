@@ -355,6 +355,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "run into <runs_dir>/<run>/confidence_<space>.npz.",
     )
     parser.add_argument(
+        "--confidence-part",
+        choices=usage_confidence.PARTS,
+        default="all",
+        help="With --confidence-unit: `ood` recomputes only the OOD groups of an "
+        "existing unit (e.g. when a new OOD dump becomes available).",
+    )
+    parser.add_argument(
         "--confidence-space",
         choices=usage_confidence.SPACES,
         default="z",
@@ -1359,7 +1366,12 @@ def _run_confidence_unit(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
     out = usage_confidence.run_unit(
-        cfg, locations, args.run_name, args.confidence_space, _stderr
+        cfg,
+        locations,
+        args.run_name,
+        args.confidence_space,
+        _stderr,
+        args.confidence_part,
     )
     print(f"wrote {out}")
     return 0

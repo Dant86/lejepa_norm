@@ -69,6 +69,14 @@ COVERAGE_MARGIN = 0.005
 # uninformative iff its 90% interval lies inside the band.
 INFORMATIVE_LOWER = 0.51
 UNINFORMATIVE_BAND = (0.49, 0.51)
+# Nested models added after the first results (post hoc, not pre-registered):
+# `M3 = M0 + rho_hat` (only the direction-predicted part of the log-radius,
+# `rho_hat = rho - resid = f(u)`, a function of the direction) and
+# `M4 = M0 + rho_hat + resid` (both parts, so a superset of M1, M2 and M3). Whether
+# the radius adds "beyond the direction" is M2 (the direction-independent part) and
+# M3 against M1: the pre-registered M1, M2 only compare with the reader's own
+# confidence scalars, not with every function of the direction.
+POST_HOC_MODELS = ("M3", "M4")
 COVERAGES = (0.5, 0.8)
 CURVE_COVERAGES = tuple(c / 10 for c in range(1, 11))
 # Replicates for the 50 corrupted cells (the clean and OOD sets use the config's).
@@ -314,11 +322,17 @@ class Query:
 def _nested_scores(
     out: ReaderOutput, rho: FloatArray, resid: FloatArray, target: BoolArray, seed: int
 ) -> dict[str, FloatArray]:
+    """`M0..M2` as pre-registered; `M3`, `M4` added post hoc (see `POST_HOC_MODELS`)."""
     base = numpy.stack([_logit(out.p1), out.margin], axis=1)
+    rho_hat = rho - resid
     return {
         "M0": out_of_fold_scores(base, target, seed),
         "M1": out_of_fold_scores(numpy.column_stack([base, rho]), target, seed),
         "M2": out_of_fold_scores(numpy.column_stack([base, resid]), target, seed),
+        "M3": out_of_fold_scores(numpy.column_stack([base, rho_hat]), target, seed),
+        "M4": out_of_fold_scores(
+            numpy.column_stack([base, rho_hat, resid]), target, seed
+        ),
     }
 
 
@@ -338,6 +352,10 @@ def _model_statistics(
     out[f"{prefix}d_auroc[M2-M0]"] = (
         out[f"{prefix}auroc[M2]"] - out[f"{prefix}auroc[M0]"]
     )
+    for name in POST_HOC_MODELS:
+        out[f"{prefix}d_auroc[{name}-M0]"] = (
+            out[f"{prefix}auroc[{name}]"] - out[f"{prefix}auroc[M0]"]
+        )
 
 
 def set_statistics(
@@ -458,6 +476,12 @@ def ood_statistics(
             "M0": out_of_fold_scores(base, positive, seed),
             "M1": out_of_fold_scores(numpy.column_stack([base, rho]), positive, seed),
             "M2": out_of_fold_scores(numpy.column_stack([base, resid]), positive, seed),
+            "M3": out_of_fold_scores(
+                numpy.column_stack([base, rho - resid]), positive, seed
+            ),
+            "M4": out_of_fold_scores(
+                numpy.column_stack([base, rho - resid, resid]), positive, seed
+            ),
         }
         for name, score in scores.items():
             out[f"{p}auroc_ood[{name}]"] = auroc(score)
@@ -467,6 +491,10 @@ def ood_statistics(
         out[f"{p}d_auroc_ood[M2-M0]"] = (
             out[f"{p}auroc_ood[M2]"] - out[f"{p}auroc_ood[M0]"]
         )
+        for name in POST_HOC_MODELS:
+            out[f"{p}d_auroc_ood[{name}-M0]"] = (
+                out[f"{p}auroc_ood[{name}]"] - out[f"{p}auroc_ood[M0]"]
+            )
     return out
 
 
@@ -667,18 +695,23 @@ def nested_rows(
     """Does the radius add error detection beyond the reader's own confidence?"""
     rows: list[Row] = []
     for reader in READERS:
-        for model in ("M1", "M2"):
+        for model in ("M1", "M2", *POST_HOC_MODELS):
             for metric, margin, scale, unit in (
                 ("d_auroc", AUROC_MARGIN, 1.0, "AUROC"),
                 ("d_acc@50", COVERAGE_MARGIN, 100.0, "points"),
                 ("d_acc@80", COVERAGE_MARGIN, 100.0, "points"),
             ):
+                if model in POST_HOC_MODELS and metric != "d_auroc":
+                    continue
                 e = aggregate(units, group, f"{reader}|{metric}[{model}-M0]")
                 rows.append(
                     {
                         "set": label,
                         "reader": reader,
-                        "comparison": f"{metric.replace('d_', '')}: {model} - M0",
+                        "comparison": (
+                            f"{metric.replace('d_', '')}: {model} - M0"
+                            + (" (post hoc)" if model in POST_HOC_MODELS else "")
+                        ),
                         "difference": round(scale * e.value, 4),
                         "unit": unit,
                         "95% CI": _interval(
@@ -709,13 +742,14 @@ def ood_rows(units: collections.abc.Sequence[Unit], label: str) -> list[Row]:
                     "verdict": "",
                 }
             )
-        for model in ("M1", "M2"):
+        for model in ("M1", "M2", *POST_HOC_MODELS):
             e = aggregate(units, label, f"{reader}|d_auroc_ood[{model}-M0]")
             rows.append(
                 {
                     "OOD set": label,
                     "reader": reader,
-                    "comparison": f"AUROC: {model} - M0",
+                    "comparison": f"AUROC: {model} - M0"
+                    + (" (post hoc)" if model in POST_HOC_MODELS else ""),
                     "value": round(e.value, 4),
                     "95% CI": _interval(e.ci95, 4),
                     "verdict": difference_verdict(e, AUROC_MARGIN),

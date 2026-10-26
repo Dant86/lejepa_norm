@@ -297,5 +297,25 @@ def test_analyze_confidence_modes_write_units_and_notes(
     units = confidence.load_unit(runs / "toy_lam0.05_s0" / "confidence_z.npz")
     shift = confidence.aggregate([units], "corr:dim", "shift_rho")
     assert shift.value < 0
+    # `--confidence-part ood` keeps the other groups and rewrites only the OOD ones.
+    before = confidence.load_unit(runs / "toy_lam0.05_s0" / "confidence_z.npz")
+    assert (
+        app.main(
+            [
+                *base,
+                "--run-name",
+                "toy_lam0.05_s0",
+                "--confidence-unit",
+                "--confidence-part",
+                "ood",
+            ]
+        )
+        == 0
+    )
+    after = confidence.load_unit(runs / "toy_lam0.05_s0" / "confidence_z.npz")
+    assert set(after.stats) == set(before.stats)
+    key = (confidence.CLEAN, f"{confidence.PROBE_U}|auroc[-rho]")
+    assert numpy.array_equal(after.stats[key], before.stats[key], equal_nan=True)
+    assert (confidence.CLEAN, f"{confidence.PROBE_U}|d_auroc[M3-M0]") in after.stats
     h_unit = confidence.load_unit(runs / "toy_lam0.1_s0" / "confidence_h.npz")
     assert h_unit.space == "h"

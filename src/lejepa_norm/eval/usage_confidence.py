@@ -35,6 +35,7 @@ FloatArray = numpy.typing.NDArray[numpy.float64]
 # (downsampled to 96 x 96) is embedded by the `radius-usage-places-control` branch;
 # its dump is used when present, the set name is fixed here to avoid a dependency.
 PLACES_TEST = "places_test"
+PARTS = ("all", "ood")
 OOD_NAMES = {dumps.DTD_TEST: "dtd", PLACES_TEST: "places"}
 SPACES = ("z", "h")
 
@@ -87,8 +88,12 @@ def run_unit(
     run_name: str,
     space: str,
     log: collections.abc.Callable[[str], None],
+    part: str = "all",
 ) -> pathlib.Path:
     """Computes and saves the unit file of one run; returns its path.
+
+    `part="ood"` recomputes only the OOD groups and keeps the rest of the existing
+    unit (used when a new OOD dump, e.g. Places365, becomes available).
 
     Raises:
         FileNotFoundError: the `stl10_train` or `stl10_test` dump is missing.
@@ -96,13 +101,17 @@ def run_unit(
     """
     if space not in SPACES:
         raise ValueError(f"space must be one of {SPACES}, got {space!r}")
+    if part not in PARTS:
+        raise ValueError(f"part must be one of {PARTS}, got {part!r}")
     run_dir = locations.runs_dir / run_name
     group, seed = _read_identity(run_dir)
     bank = _load(locations, run_name, dumps.STL10_TRAIN, space)
     test = _load(locations, run_name, dumps.STL10_TEST, space)
     if bank is None or test is None:
         raise FileNotFoundError(f"{run_name}: stl10_train / stl10_test dump missing")
-    corrupted = _load(locations, run_name, dumps.STL10_C, space)
+    corrupted = (
+        _load(locations, run_name, dumps.STL10_C, space) if part == "all" else None
+    )
     ood = {
         OOD_NAMES[name]: shard
         for name in OOD_NAMES
@@ -148,11 +157,16 @@ def run_unit(
     log("readers applied to every query set")
 
     stats: dict[tuple[str, str], FloatArray] = {}
+    if part == "ood":
+        previous = confidence.load_unit(run_dir / unit_file(space))
+        stats = {k: v for k, v in previous.stats.items() if not k[0].startswith("ood:")}
     booter = confidence.Booter(clean_x.shape[0], cfg.eval.num_bootstrap, s_clean)
     clean = queries[confidence.CLEAN]
-    for metric, value in confidence.set_statistics(
-        clean, class_rho, booter, s_fold
-    ).items():
+    for metric, value in (
+        confidence.set_statistics(clean, class_rho, booter, s_fold).items()
+        if part == "all"
+        else ()
+    ):
         stats[confidence.CLEAN, metric] = value
     if cell_rows:
         cell_booter = confidence.Booter(
@@ -513,7 +527,7 @@ def summary_rows(by_group: dict[str, list[confidence.Unit]]) -> list[Row]:
             )
             row["clean AUROC(-rho)"] = round(auroc.value, 4)
             row["clean verdict"] = confidence.signal_verdict(auroc)
-            for model in ("M1", "M2"):
+            for model in ("M1", "M2", "M3"):
                 d = confidence.aggregate(
                     units, confidence.CLEAN, f"{reader}|d_auroc[{model}-M0]"
                 )
@@ -526,7 +540,7 @@ def summary_rows(by_group: dict[str, list[confidence.Unit]]) -> list[Row]:
                     units, confidence.ALL_CORRUPTIONS, f"{reader}|auroc[-rho]"
                 )
                 row["corrupted AUROC(-rho)"] = round(auroc.value, 4)
-                for model in ("M1", "M2"):
+                for model in ("M1", "M2", "M3"):
                     d = confidence.aggregate(
                         units,
                         confidence.ALL_CORRUPTIONS,
@@ -580,6 +594,8 @@ def write_notes(
         base,
         f"analyze.confidence_summary_{space}",
         f"### Summary ({space} space, direction-only readers)\n\n"
+        "M3 is a post hoc addition (only the direction-predicted part of the "
+        "log-radius); M1, M2 are pre-registered.\n\n"
         + reporting.markdown_table(summary_rows(by_group)),
     )
     return written
