@@ -18,7 +18,7 @@ Claim under test (stated so it can fail): **the radius is a sample-level reliabi
 
 ## Definitions (fixed now)
 
-- **Bank:** STL-10 `train` center-view embeddings (5000, labeled). **Queries:** STL-10 `test` (8000, clean), the 50 STL-10-C cells (8000 each), DTD `test`, SVHN `test`. One center view per image; the same readers are fitted on the clean bank only.
+- **Bank:** STL-10 `train` center-view embeddings (5000, labeled). **Queries:** STL-10 `test` (8000, clean), the 50 STL-10-C cells (8000 each), DTD `test`, Places365 `val` (no SVHN). One center view per image; the same readers are fitted on the clean bank only.
 - **Radius signals.** `rho = log ||x||`; `resid = rho - f(u)` with `u = x/||x||` and `f` the kernel ridge (exp-dot kernel, nested-CV hyperparameters) fitted on the clean bank (`redundancy.fit_predict`; the same clean-fitted map as E6 and the shift study). On clean `test`, `f(u)` is held out. On corrupted images `resid` contains the systematic shift the clean map cannot explain (E6).
 - **Readers and their confidence.** `probe_z`: logistic linear probe on x (the E1 reader, sees the radius); `probe_u`: the same probe on `u` (direction only); `knn_u`: cosine k-NN, k = 20 (direction only, radius-free by construction). Confidence = maximum class probability (vote share for k-NN) `p1`; margin = `p1 - p2`. Correct = argmax equals the label. The headline readers for "beyond the direction" are `probe_u` and `knn_u`; `probe_z` is reported as the standard reader.
 - **Error-detection AUROC:** errors are the positive class; a score is oriented so that a *high* score predicts an error (`-rho`, `-resid`, `-p1`, `-margin`). 0.5 = uninformative.

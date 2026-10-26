@@ -78,15 +78,17 @@ def load_set(directory: str | os.PathLike[str]) -> shards.EmbeddingShard | None:
     return concatenate([shards.load_shard(f) for f in files])
 
 
-def load_center_set(directory: str | os.PathLike[str]) -> shards.CenterShard | None:
-    """Like `load_set` but keeps only the center-view z (None if no shards).
+def load_center_set(
+    directory: str | os.PathLike[str], space: str = "z"
+) -> shards.CenterShard | None:
+    """Like `load_set` but keeps only the center view of `space` (None if no shards).
 
     Memory is `N * d_z` floats, so even STL-10-C (400k images) fits easily.
     """
     files = sorted(pathlib.Path(directory).glob("*.npz"))
     if not files:
         return None
-    parts = [shards.load_center_shard(f) for f in files]
+    parts = [shards.load_center_shard(f, space) for f in files]
     return shards.CenterShard(
         z=numpy.concatenate([p.z for p in parts]),
         image_id=numpy.concatenate([p.image_id for p in parts]),
