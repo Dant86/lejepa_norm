@@ -193,6 +193,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         metavar="PREFIX",
         help="k-NN with randomized radius for runs PREFIX_* (needs --config).",
     )
+    parser.add_argument(
+        "--space",
+        choices=("z", "h"),
+        default="z",
+        help="--randomize-radius only: embedding to randomize (default z; h is an "
+        "explicit exception for the E2 baselines).",
+    )
     mode.add_argument(
         "--retrieval",
         metavar="PREFIX",
@@ -705,7 +712,9 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
             skipped.append({"run": run.name, "missing dump": ", ".join(missing)})
             print(f"skipping {run.name}: no {', '.join(missing)} dump", file=sys.stderr)
             continue
-        evaluation = randomization.evaluate_shards(bank, query, cfg.eval, cfg.seed)
+        evaluation = randomization.evaluate_shards(
+            bank, query, cfg.eval, cfg.seed, args.space
+        )
         results.append(randomization.RunResult(run.name, run.lam, run.seed, evaluation))
         diagnostics += [
             {
@@ -731,8 +740,8 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
         note,
         "analyze.randomization_comparison",
         "### Paired accuracy change vs the baseline, per lambda\n\n"
-        f"z-space, center views; bank = STL-10 train, test set = STL-10 test; the "
-        "same transformation is applied to bank and test set independently. "
+        f"{args.space}-space, center views; bank = STL-10 train, test set = STL-10 "
+        "test; the same transformation is applied to bank and test set independently. "
         "Differences are in accuracy points (condition minus baseline on the same "
         "test images), averaged over training seeds; intervals are paired "
         f"bootstrap percentile intervals ({cfg.eval.num_bootstrap} replicates, test "
