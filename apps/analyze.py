@@ -125,6 +125,7 @@ Examples:
         --svhn-control-run radius_marginal_lam0.05_s0
     python apps/analyze.py --config configs/base.yaml --svhn-control radius_marginal \
         --note radius_usage/svhn_control.md
+    # the same with Places365 as the OOD set (add --control-study places to each)
     python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
         --retrieval-run radius_marginal_lam0.05_s0
     python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
@@ -342,6 +343,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "--transfer",
         action="store_true",
         help="Per-run mode only: run just the clean-to-corrupted radius transfer.",
+    )
+    parser.add_argument(
+        "--control-study",
+        choices=sorted(svhn_control.STUDIES),
+        default="svhn",
+        help="With --svhn-control: the decisive OOD set, `svhn` (default) or "
+        "`places` (Places365, see `research_notes/radius_usage/places_control.md`).",
     )
     parser.add_argument(
         "--svhn-control-stats",
@@ -1346,14 +1354,17 @@ def _run_shift_unit(args: argparse.Namespace) -> int:
 def _run_svhn_control(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
+    study = svhn_control.STUDIES[args.control_study]
     if args.svhn_control_stats:
-        print(f"wrote {svhn_control.compute_image_stats(locations, _stderr)}")
+        print(f"wrote {svhn_control.compute_image_stats(locations, _stderr, study)}")
     elif args.svhn_control_run:
-        out = svhn_control.run_unit(cfg, locations, args.svhn_control_run, _stderr)
+        out = svhn_control.run_unit(
+            cfg, locations, args.svhn_control_run, _stderr, study
+        )
         print(f"wrote {out}")
     else:
         for out in svhn_control.write_notes(
-            cfg, locations, args.svhn_control, args.note, not args.no_figures
+            cfg, locations, args.svhn_control, args.note, not args.no_figures, study
         ):
             print(f"wrote {out}")
     return 0

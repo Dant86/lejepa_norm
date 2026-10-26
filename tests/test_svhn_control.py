@@ -18,12 +18,13 @@ from lejepa_norm.eval import svhn_control
 
 REPO = pathlib.Path(__file__).parent.parent
 D, SIZE = 8, 16
-SIZES = {"train": 240, "test": 160, "dtd": 60, "svhn": 200}
+SIZES = {"train": 240, "test": 160, "dtd": 60, "svhn": 200, "places": 480}
 LAYOUT = {
     "train": ("stl10", "train", dumps.STL10_TRAIN),
     "test": ("stl10", "test", dumps.STL10_TEST),
     "dtd": ("dtd", "test", dumps.DTD_TEST),
     "svhn": ("svhn", "test", dumps.SVHN_TEST),
+    "places": ("places365", "val", dumps.PLACES_TEST),
 }
 
 
@@ -59,16 +60,18 @@ def test_image_statistics_order_images_as_expected() -> None:
 
 
 def _build_world(
-    tmp_path: pathlib.Path, svhn_shift: float, svhn_contrast: tuple[float, float]
+    tmp_path: pathlib.Path,
+    svhn_shift: float,
+    svhn_contrast: tuple[float, float],
+    places_contrast: tuple[float, float] = (0.05, 0.4),
 ) -> paths.Paths:
     """Radius is driven by contrast (a low-level statistic) in every set; SVHN
     additionally has a log-radius offset `svhn_shift` that no statistic explains."""
     data, runs, embed = tmp_path / "data", tmp_path / "runs", tmp_path / "embed"
     rng = numpy.random.default_rng(0)
+    ranges = {"svhn": svhn_contrast, "places": places_contrast}
     contrast = {
-        name: rng.uniform(0.05, 0.4, n)
-        if name != "svhn"
-        else rng.uniform(*svhn_contrast, n)
+        name: rng.uniform(*ranges.get(name, (0.05, 0.4)), n)
         for name, n in SIZES.items()
     }
     for name, c in contrast.items():
@@ -116,16 +119,19 @@ def _build_world(
     return paths.Paths(data, runs, embed, tmp_path / "notes", None)
 
 
-def _aggregate(locations: paths.Paths) -> svhn_control.LambdaResult:
-    svhn_control.compute_image_stats(locations, lambda _: None)
+def _aggregate(
+    locations: paths.Paths, study: svhn_control.Study = svhn_control.SVHN
+) -> svhn_control.LambdaResult:
+    svhn_control.compute_image_stats(locations, lambda _: None, study)
     units: list[svhn_control.Unit] = []
     for seed in (0, 1):
         run = f"toy_lam0.05_s{seed}"
         run_cfg = config.load_config(locations.runs_dir / run / "config.resolved.yaml")
-        out = svhn_control.run_unit(run_cfg, locations, run, lambda _: None)
+        out = svhn_control.run_unit(run_cfg, locations, run, lambda _: None, study)
         units.append(svhn_control.load_unit(out))
-    raw = svhn_control.load_image_stats(locations.runs_dir)
-    return svhn_control.evaluate(units, raw, 40, numpy.random.default_rng(0))[0]
+    raw = svhn_control.load_image_stats(locations.runs_dir, study)
+    rng = numpy.random.default_rng(0)
+    return svhn_control.evaluate(units, raw, 40, rng, study)[0]
 
 
 def test_radius_signal_that_statistics_explain_is_removed_by_the_controls(
@@ -162,6 +168,53 @@ def test_radius_signal_that_statistics_miss_survives_every_control(
     assert row["matched AUROC reading"] == ood_radius.INFORMATIVE
     # The statistics still explain the ID law (R^2 high in-distribution).
     assert result.r2[svhn_control.R2_STATS_GBM][0] > 0.6
+
+
+def test_capped_matching_respects_the_cap_and_reduces_to_nearest() -> None:
+    rng = numpy.random.default_rng(0)
+    reference = rng.normal(size=(20, 3))
+    query = rng.normal(size=(50, 3)) + 2.0  # all far on one side: unlimited collapses
+    index, _ = svhn_control.nearest(query, reference)
+    assert numpy.bincount(index, minlength=20).max() > 3
+    capped = svhn_control.capped_nearest(query, reference, 3, num_candidates=5)
+    assert capped.shape == (50,)
+    assert numpy.bincount(capped, minlength=20).max() <= 3
+    loose = svhn_control.capped_nearest(query, reference, 50)
+    numpy.testing.assert_array_equal(loose, index)
+    with pytest.raises(ValueError):
+        svhn_control.capped_nearest(query, reference, 2)
+
+
+def test_places_study_is_valid_when_statistics_overlap_and_invalid_when_not(
+    tmp_path: pathlib.Path,
+) -> None:
+    places = svhn_control.PLACES
+    # Places images drawn like STL-10: the statistics cannot tell them apart.
+    valid = _aggregate(_build_world(tmp_path / "a", 0.0, (0.05, 0.4)), places)
+    assert set(valid.ood) == {dumps.DTD_TEST, dumps.PLACES_TEST}
+    assert valid.matched[dumps.PLACES_TEST].max_multiplicity <= 5
+    row = next(
+        r
+        for r in svhn_control.validity_rows(valid, places)
+        if r["OOD set"] == dumps.PLACES_TEST
+    )
+    assert row["valid"] == "yes"
+    overall = svhn_control.overall_rows(valid, places)
+    verdict = next(r for r in overall if r["OOD set"] == dumps.PLACES_TEST)
+    assert verdict["overall (pre-registered rule)"] != svhn_control.INVALID
+    # Places images far outside the bank's statistics: validity fails, no reading.
+    saturated = _aggregate(
+        _build_world(tmp_path / "b", 0.0, (0.05, 0.4), (0.002, 0.01)), places
+    )
+    row = next(
+        r
+        for r in svhn_control.validity_rows(saturated, places)
+        if r["OOD set"] == dumps.PLACES_TEST
+    )
+    assert row["valid"] == "no"
+    overall = svhn_control.overall_rows(saturated, places)
+    verdict = next(r for r in overall if r["OOD set"] == dumps.PLACES_TEST)
+    assert verdict["overall (pre-registered rule)"] == svhn_control.INVALID
 
 
 def test_difference_verdict_follows_the_preregistered_rule() -> None:

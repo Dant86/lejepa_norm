@@ -76,6 +76,15 @@ statistics`: the residual combination of (c) does not add (verdict not `A higher
 informative. Everything else: `partly explained`. The fraction of the AUROC gain of
 the shift combination that remains after removing the statistics is reported
 alongside.
+
+*Places365 study* (`PLACES`; `research_notes/radius_usage/places_control.md`). The
+same analysis with Places365 validation (only downsampled to 96x96) as the decisive
+OOD set, because the upsampled SVHN saturated the statistics. Differences: matching
+is capped at `PLACES_MAX_MATCHES` per STL-10 test image (`capped_nearest`), and the
+overall reading is `INVALID` unless the validity checks hold: the statistics
+Mahalanobis AUROC is at most `VALID_MAX_MAHAL_AUROC`, the standardized mean
+difference after matching is below `VALID_MAX_ABS_SMD` on each matching statistic,
+and the cap holds.
 """
 
 # scikit-learn ships no type stubs.
@@ -118,16 +127,66 @@ SUBSET_FRACTION = 0.1
 MATCH_NAMES = ("lum_mean", "lum_std", "laplacian_var")
 RIDGE_ALPHAS = tuple(float(a) for a in numpy.logspace(-3, 3, 13))
 GBM_ITERATIONS = 300
-UNIT_FILE = "svhn_control.npz"
-STATS_DIR = "_svhn_control"
 STATS_FILE = "image_stats.npz"
-STAT_SETS = (dumps.STL10_TRAIN, dumps.STL10_TEST, dumps.DTD_TEST, dumps.SVHN_TEST)
 _SPLITS = {
     dumps.STL10_TRAIN: ("stl10", "train"),
     dumps.STL10_TEST: ("stl10", "test"),
     dumps.DTD_TEST: ("dtd", "test"),
     dumps.SVHN_TEST: ("svhn", "test"),
+    dumps.PLACES_TEST: ("places365", "val"),
 }
+# Validity of the Places365 control (pre-registered in `places_control.md`).
+VALID_MAX_MAHAL_AUROC = 0.90
+VALID_MAX_ABS_SMD = 0.25
+PLACES_MAX_MATCHES = 5
+
+
+@dataclasses.dataclass(frozen=True)
+class Study:
+    """One control study: which OOD set is decisive and how it is matched.
+
+    Attributes:
+        name: Short name; prefix of unit/statistics files, note sections and figures.
+        label: Human-readable name of the decisive OOD set.
+        target: The decisive OOD set (`dumps` name).
+        ood_sets: OOD sets analyzed (DTD is descriptive).
+        max_matches: Cap on the matches per STL-10 test image (None: unlimited).
+        validity: Whether the pre-registered validity checks V1 to V3 apply.
+    """
+
+    name: str
+    label: str
+    target: str
+    ood_sets: tuple[str, ...]
+    max_matches: int | None
+    validity: bool
+
+    @property
+    def stat_sets(self) -> tuple[str, ...]:
+        """Sets whose image statistics are needed."""
+        return (dumps.STL10_TRAIN, dumps.STL10_TEST, *self.ood_sets)
+
+    @property
+    def unit_file(self) -> str:
+        """Name of the per-run unit file."""
+        return f"{self.name}_control.npz"
+
+    @property
+    def stats_dir(self) -> str:
+        """Directory (under the runs directory) of the statistics file."""
+        return f"_{self.name}_control"
+
+
+SVHN = Study("svhn", "SVHN", dumps.SVHN_TEST, dumps.OOD_SETS, None, False)
+PLACES = Study(
+    "places",
+    "Places365",
+    dumps.PLACES_TEST,
+    (dumps.DTD_TEST, dumps.PLACES_TEST),
+    PLACES_MAX_MATCHES,
+    True,
+)
+STUDIES = {study.name: study for study in (SVHN, PLACES)}
 
 # (a) predictors of the ID log-radius.
 R2_STATS_RIDGE = "statistics, ridge"
@@ -231,6 +290,7 @@ A_HIGHER = "A higher"
 EQUIVALENT = "equivalent"
 B_HIGHER = "B higher"
 INCONCLUSIVE = ood_radius.INCONCLUSIVE
+INVALID = "invalid control (not interpreted)"
 EXPLAINED = "explained by low-level statistics"
 INDEPENDENT = "independent of low-level statistics"
 PARTLY = "partly explained"
@@ -252,21 +312,23 @@ def difference_verdict(difference: FloatArray, margin: float) -> str:
 # --------------------------------------------------------------------------- stats
 
 
-def _stats_path(runs_dir: str | os.PathLike[str]) -> pathlib.Path:
-    return pathlib.Path(runs_dir) / STATS_DIR / STATS_FILE
+def _stats_path(runs_dir: str | os.PathLike[str], study: Study) -> pathlib.Path:
+    return pathlib.Path(runs_dir) / study.stats_dir / STATS_FILE
 
 
 def compute_image_stats(
-    locations: paths.Paths, log: collections.abc.Callable[[str], None]
+    locations: paths.Paths,
+    log: collections.abc.Callable[[str], None],
+    study: Study = SVHN,
 ) -> pathlib.Path:
-    """Computes `image_stats` of the four sets once; returns the written file."""
+    """Computes `image_stats` of the study's sets once; returns the written file."""
     arrays: dict[str, FloatArray] = {}
-    for name in STAT_SETS:
+    for name in study.stat_sets:
         dataset, split = _SPLITS[name]
         images = numpy.load(layout.images_path(locations.data_dir, dataset, split))
         arrays[name] = image_stats.compute(images)
         log(f"{name}: statistics of {images.shape[0]} images")
-    out = _stats_path(locations.runs_dir)
+    out = _stats_path(locations.runs_dir, study)
     out.parent.mkdir(parents=True, exist_ok=True)
     partial = out.with_name(out.name + ".partial")
     with open(partial, "wb") as f:
@@ -275,10 +337,12 @@ def compute_image_stats(
     return out
 
 
-def load_image_stats(runs_dir: str | os.PathLike[str]) -> dict[str, FloatArray]:
+def load_image_stats(
+    runs_dir: str | os.PathLike[str], study: Study = SVHN
+) -> dict[str, FloatArray]:
     """Raw (untransformed) statistics per set written by `compute_image_stats`."""
-    with numpy.load(_stats_path(runs_dir)) as arrays:
-        return {name: arrays[name] for name in STAT_SETS}
+    with numpy.load(_stats_path(runs_dir, study)) as arrays:
+        return {name: arrays[name] for name in study.stat_sets}
 
 
 # ------------------------------------------------------------------ model building
@@ -502,8 +566,12 @@ def compute_unit(
     locations: paths.Paths,
     run_name: str,
     log: collections.abc.Callable[[str], None],
+    study: Study = SVHN,
 ) -> Unit:
     """Computes the unit of one run from its center-view dumps and the statistics.
+
+    The score columns of an OOD set the shift study did not cover (Places365) are
+    computed here with `ood_radius.compute_scores`, exactly as the shift study does.
 
     Raises:
         FileNotFoundError: a dump, `shift_ood.npz` or the statistics file is missing.
@@ -511,9 +579,9 @@ def compute_unit(
     run_dir = locations.runs_dir / run_name
     resolved = config.load_config(run_dir / "config.resolved.yaml")
     shift_unit = ood_radius.load_unit(run_dir / "shift_ood.npz")
-    raw = load_image_stats(locations.runs_dir)
+    raw = load_image_stats(locations.runs_dir, study)
     z: dict[str, FloatArray] = {}
-    for name in STAT_SETS:
+    for name in study.stat_sets:
         loaded = dumps.load_center_set(
             dumps.set_dir(locations.embed_dir, run_name, name)
         )
@@ -524,9 +592,9 @@ def compute_unit(
         ):
             raise ValueError(f"{name}: dump rows do not match the image arrays")
         z[name] = loaded.z.astype(numpy.float64)
-    rho = {name: features.log_radius(z[name]) for name in STAT_SETS}
+    rho = {name: features.log_radius(z[name]) for name in study.stat_sets}
     std = standardizer(raw[dumps.STL10_TRAIN])
-    x = {name: std(raw[name]) for name in STAT_SETS}
+    x = {name: std(raw[name]) for name in study.stat_sets}
     seed, folds = cfg.seed, cfg.eval.cv_folds
     x_bank, rho_bank = x[dumps.STL10_TRAIN], rho[dumps.STL10_TRAIN]
     x_test, rho_test = x[dumps.STL10_TEST], rho[dumps.STL10_TEST]
@@ -557,8 +625,16 @@ def compute_unit(
     # (b)-(d) OOD columns.
     state = ood_radius.bank_stats(z[dumps.STL10_TRAIN], cfg.eval.knn_k)
     scores: dict[str, dict[str, FloatArray]] = {}
-    for ood in dumps.OOD_SETS:
-        shift_scores = shift_unit.scores[ood]
+    for ood in study.ood_sets:
+        shift_scores = shift_unit.scores.get(ood)
+        if shift_scores is None:
+            shift_scores = ood_radius.compute_scores(
+                z[dumps.STL10_TRAIN],
+                z[dumps.STL10_TEST],
+                z[ood],
+                cfg.eval.knn_k,
+                cfg.seed,
+            )
         scores[ood] = ood_columns(
             shift_scores,
             state,
@@ -575,7 +651,7 @@ def compute_unit(
         resolved.seed,
         shift_unit.num_id,
         r2,
-        {k: rho[k] for k in (dumps.STL10_TEST, *dumps.OOD_SETS)},
+        {k: rho[k] for k in (dumps.STL10_TEST, *study.ood_sets)},
         scores,
     )
 
@@ -585,10 +661,11 @@ def run_unit(
     locations: paths.Paths,
     run_name: str,
     log: collections.abc.Callable[[str], None],
+    study: Study = SVHN,
 ) -> pathlib.Path:
     """Computes and saves the unit file of one run; returns its path."""
-    out = locations.runs_dir / run_name / UNIT_FILE
-    save_unit(out, compute_unit(cfg, locations, run_name, log))
+    out = locations.runs_dir / run_name / study.unit_file
+    save_unit(out, compute_unit(cfg, locations, run_name, log, study))
     return out
 
 
@@ -643,6 +720,51 @@ def nearest(
     return index, dist
 
 
+def capped_nearest(
+    query: FloatArray,
+    reference: FloatArray,
+    cap: int,
+    num_candidates: int = 64,
+    chunk: int = 1024,
+) -> IntArray:
+    """Nearest `reference` row per query with at most `cap` queries per row.
+
+    Greedy: queries are served in order of increasing distance to their nearest
+    reference row; each takes its nearest row that still has capacity (among its
+    `num_candidates` nearest, otherwise the nearest row with capacity overall).
+
+    Raises:
+        ValueError: `cap * len(reference) < len(query)`.
+    """
+    if cap * reference.shape[0] < query.shape[0]:
+        raise ValueError("matching cap too small for the number of queries")
+    ref_sq = numpy.square(reference).sum(axis=1)
+    k = min(num_candidates, reference.shape[0])
+    cand = numpy.empty((query.shape[0], k), dtype=numpy.intp)
+    dist = numpy.empty((query.shape[0], k))
+    for start in range(0, query.shape[0], chunk):
+        q = query[start : start + chunk]
+        d2 = numpy.square(q).sum(axis=1)[:, None] - 2.0 * q @ reference.T + ref_sq
+        part = numpy.argpartition(d2, k - 1, axis=1)[:, :k]
+        d_part = numpy.take_along_axis(d2, part, axis=1)
+        order = numpy.argsort(d_part, axis=1, kind="stable")
+        cand[start : start + chunk] = numpy.take_along_axis(part, order, axis=1)
+        dist[start : start + chunk] = numpy.take_along_axis(d_part, order, axis=1)
+    used = numpy.zeros(reference.shape[0], dtype=numpy.intp)
+    out = numpy.empty(query.shape[0], dtype=numpy.intp)
+    for i in numpy.argsort(dist[:, 0], kind="stable"):
+        free = cand[i][used[cand[i]] < cap]
+        if free.size:
+            j = int(free[0])
+        else:
+            open_rows = numpy.flatnonzero(used < cap)
+            d2 = numpy.square(reference[open_rows] - query[i]).sum(axis=1)
+            j = int(open_rows[d2.argmin()])
+        out[i] = j
+        used[j] += 1
+    return out
+
+
 @dataclasses.dataclass(frozen=True)
 class Matching:
     """Statistics-matched ID reference of one OOD set.
@@ -652,18 +774,33 @@ class Matching:
         subset: Indices of the `SUBSET_FRACTION` STL-10 test images closest to the
             OOD set (smallest distance to their nearest OOD image).
         balance: Rows describing the balance of the matching statistics.
+        max_multiplicity: Largest number of OOD images matched to one STL-10 image.
+        num_unique: Number of distinct STL-10 test images used as matches.
     """
 
     nearest_id: IntArray
     subset: IntArray
     balance: list[Row]
+    max_multiplicity: int
+    num_unique: int
 
 
 def build_matching(
-    features_id: FloatArray, features_ood: FloatArray, lam: float, ood_set: str
+    features_id: FloatArray,
+    features_ood: FloatArray,
+    lam: float,
+    ood_set: str,
+    max_matches: int | None = None,
 ) -> Matching:
-    """Matches `features_ood` rows to STL-10 test rows (see module docstring)."""
-    nearest_id, _ = nearest(features_ood, features_id)
+    """Matches `features_ood` rows to STL-10 test rows (see module docstring).
+
+    With `max_matches`, no STL-10 test image is matched more than that often
+    (`capped_nearest`); otherwise matching is with unlimited replacement.
+    """
+    if max_matches is None:
+        nearest_id, _ = nearest(features_ood, features_id)
+    else:
+        nearest_id = capped_nearest(features_ood, features_id, max_matches)
     _, to_ood = nearest(features_id, features_ood)
     size = max(1, int(round(SUBSET_FRACTION * features_id.shape[0])))
     subset = numpy.argsort(to_ood, kind="stable")[:size]
@@ -703,7 +840,13 @@ def build_matching(
             ),
         }
     )
-    return Matching(nearest_id, subset, rows)
+    return Matching(
+        nearest_id,
+        subset,
+        rows,
+        int(multiplicity.max()),
+        int((multiplicity > 0).sum()),
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -718,6 +861,8 @@ class MatchedResult:
         auroc_matched: Same against the weighted matched reference.
         auroc_subset: Same against the closest-10% subset.
         balance: Balance rows.
+        max_multiplicity: Largest number of OOD images matched to one STL-10 image.
+        num_unique: Number of distinct STL-10 test images used as matches.
     """
 
     gap: FloatArray
@@ -727,6 +872,8 @@ class MatchedResult:
     auroc_matched: FloatArray
     auroc_subset: FloatArray
     balance: list[Row]
+    max_multiplicity: int
+    num_unique: int
 
 
 def _auroc_low(
@@ -865,6 +1012,7 @@ def evaluate(
     raw_stats: dict[str, FloatArray],
     num_bootstrap: int,
     rng: numpy.random.Generator,
+    study: Study = SVHN,
 ) -> list[LambdaResult]:
     """Aggregates the units per lambda (seed means, paired image bootstrap)."""
     std = standardizer(raw_stats[dumps.STL10_TRAIN])
@@ -877,19 +1025,28 @@ def evaluate(
         r2 = {name: r2_replicates(group, draws, name) for name in R2_NAMES}
         ood: dict[str, OodStats] = {}
         matched: dict[str, MatchedResult] = {}
-        for ood_set in dumps.OOD_SETS:
+        for ood_set in study.ood_sets:
             ood[ood_set] = ood_replicates(group, ood_set, num_bootstrap, rng)
             matching = build_matching(
                 match_features[dumps.STL10_TEST],
                 match_features[ood_set],
                 lam,
                 ood_set,
+                study.max_matches,
             )
             gap, mgap, closed, a_all, a_matched, a_subset = matched_replicates(
                 group, ood_set, matching, num_bootstrap, rng
             )
             matched[ood_set] = MatchedResult(
-                gap, mgap, closed, a_all, a_matched, a_subset, matching.balance
+                gap,
+                mgap,
+                closed,
+                a_all,
+                a_matched,
+                a_subset,
+                matching.balance,
+                matching.max_multiplicity,
+                matching.num_unique,
             )
         results.append(LambdaResult(lam, len(group), r2, ood, matched))
     return results
@@ -1045,8 +1202,62 @@ def balance_rows(result: LambdaResult) -> list[Row]:
     return [row for m in result.matched.values() for row in m.balance]
 
 
-def overall_rows(result: LambdaResult) -> list[Row]:
-    """The pre-registered overall reading per OOD set (decisive for SVHN)."""
+SMD_KEY = "std. mean difference, matched - OOD"
+
+
+def validity_checks(
+    result: LambdaResult, ood_set: str, max_matches: int | None
+) -> bool:
+    """Whether V1 to V3 of the Places365 pre-registration hold for `ood_set`."""
+    mahal = float(result.ood[ood_set].auroc[STATS_MAHAL][0])
+    matched = result.matched[ood_set]
+    smd = [
+        abs(float(row[SMD_KEY]))
+        for row in matched.balance
+        if isinstance(row.get(SMD_KEY), float)
+    ]
+    capped = max_matches is None or matched.max_multiplicity <= max_matches
+    return (
+        mahal <= VALID_MAX_MAHAL_AUROC
+        and len(smd) == len(MATCH_NAMES)
+        and max(smd) < VALID_MAX_ABS_SMD
+        and capped
+    )
+
+
+def validity_rows(result: LambdaResult, study: Study) -> list[Row]:
+    """The pre-registered validity checks V1 to V3 per OOD set."""
+    rows: list[Row] = []
+    for ood_set, stats in result.ood.items():
+        matched = result.matched[ood_set]
+        smd = {
+            str(row["statistic (bank-standardized, log where applicable)"]): float(
+                row[SMD_KEY]
+            )
+            for row in matched.balance
+            if isinstance(row.get(SMD_KEY), float)
+        }
+        mahal = stats.auroc[STATS_MAHAL]
+        rows.append(
+            {
+                "lambda": result.lam,
+                "OOD set": ood_set,
+                "V1 statistics Mahalanobis AUROC [95% CI] (needs <= 0.90)": _fmt(mahal),
+                "V2 max |std. mean diff| after matching (needs < 0.25)": max(
+                    abs(v) for v in smd.values()
+                ),
+                "V3 max matches per STL-10 image": matched.max_multiplicity,
+                "V3 unique matches": matched.num_unique,
+                "valid": "yes"
+                if validity_checks(result, ood_set, study.max_matches)
+                else "no",
+            }
+        )
+    return rows
+
+
+def overall_rows(result: LambdaResult, study: Study = SVHN) -> list[Row]:
+    """The pre-registered overall reading per OOD set (decisive: `study.target`)."""
     rows: list[Row] = []
     for ood_set, stats in result.ood.items():
         a = stats.auroc
@@ -1069,6 +1280,12 @@ def overall_rows(result: LambdaResult) -> list[Row]:
             verdict = INDEPENDENT
         else:
             verdict = PARTLY
+        if (
+            study.validity
+            and ood_set == study.target
+            and not validity_checks(result, ood_set, study.max_matches)
+        ):
+            verdict = INVALID
         rows.append(
             {
                 "lambda": result.lam,
@@ -1088,13 +1305,13 @@ def overall_rows(result: LambdaResult) -> list[Row]:
 
 
 def figures(
-    result: LambdaResult,
+    result: LambdaResult, study: Study = SVHN
 ) -> list[tuple[str, typing.Any, str]]:
     """`(file stem, figure, alt text)` of the three summary figures."""
     r2_values = {name: (float(v[0]), *_ci(v)) for name, v in result.r2.items()}
-    svhn = result.ood[dumps.SVHN_TEST].auroc
+    target = result.ood[study.target].auroc
     auroc_values = {
-        name: (float(svhn[name][0]), *_ci(svhn[name]))
+        name: (float(target[name][0]), *_ci(target[name]))
         for name in (
             RADIUS_LOW,
             DEVIATION,
@@ -1106,7 +1323,7 @@ def figures(
             DIR_STATS,
         )
     }
-    matched = result.matched[dumps.SVHN_TEST]
+    matched = result.matched[study.target]
     matched_values = {
         "all STL-10 test": (float(matched.auroc_all[0]), *_ci(matched.auroc_all)),
         "matched reference": (
@@ -1129,20 +1346,21 @@ def figures(
             "R^2 of log-radius",
         ),
         (
-            "svhn_auroc",
+            f"{study.name}_auroc",
             plotting.bar_plot(
                 auroc_values,
-                f"SVHN OOD AUROC (lambda {result.lam:g})",
+                f"{study.label} OOD AUROC (lambda {result.lam:g})",
                 "AUROC",
                 reference=0.5,
             ),
-            "SVHN AUROC by score",
+            f"{study.label} AUROC by score",
         ),
         (
-            "svhn_matched",
+            f"{study.name}_matched",
             plotting.bar_plot(
                 matched_values,
-                f"AUROC of low radius, SVHN vs reference (lambda {result.lam:g})",
+                f"AUROC of low radius, {study.label} vs reference "
+                f"(lambda {result.lam:g})",
                 "AUROC",
                 reference=0.5,
             ),
@@ -1151,15 +1369,23 @@ def figures(
     ]
 
 
-def sections(result: LambdaResult, cfg: config.ExperimentConfig) -> dict[str, str]:
+def sections(
+    result: LambdaResult, cfg: config.ExperimentConfig, study: Study = SVHN
+) -> dict[str, str]:
     """Generated note sections of one lambda."""
+    prefix = f"analyze.{study.name}_control"
+    cap = (
+        "with unlimited replacement"
+        if study.max_matches is None
+        else f"with at most {study.max_matches} matches per STL-10 test image"
+    )
     boot = (
         f"Seed means with 95% percentile intervals ({cfg.eval.num_bootstrap} image "
         "bootstrap replicates, ID and OOD images resampled separately, paired across "
         "scores). Rules and margins: docstring of `lejepa_norm.eval.svhn_control`."
     )
-    return {
-        "analyze.svhn_control_r2": (
+    out = {
+        f"{prefix}_r2": (
             "### (a) Held-out R^2 of the ID log-radius (fit on STL-10 train, "
             "evaluated on STL-10 test)\n\n"
             + boot
@@ -1168,13 +1394,13 @@ def sections(result: LambdaResult, cfg: config.ExperimentConfig) -> dict[str, st
             + "\n\n"
             + reporting.markdown_table(r2_difference_rows(result))
         ),
-        "analyze.svhn_control_auroc": (
+        f"{prefix}_auroc": (
             "### (b) AUROC of each score (higher = more OOD)\n\n"
             + boot
             + "\n\n"
             + reporting.markdown_table(score_rows(result))
         ),
-        "analyze.svhn_control_compare": (
+        f"{prefix}_compare": (
             "### (b)-(d) Pre-registered AUROC differences\n\n"
             + boot
             + f" Margin {AUROC_MARGIN:g} AUROC: `{A_HIGHER}` iff the lower 95% bound "
@@ -1182,23 +1408,35 @@ def sections(result: LambdaResult, cfg: config.ExperimentConfig) -> dict[str, st
             "(-0.01, +0.01), `B higher` iff the upper 95% bound is below -0.01.\n\n"
             + reporting.markdown_table(comparison_rows(result))
         ),
-        "analyze.svhn_control_matched": (
+        f"{prefix}_matched": (
             "### Matched control\n\n"
-            "Each OOD image is matched to its nearest STL-10 test image in the "
-            "(mean luminance, contrast, log Laplacian variance) space.\n\n"
+            "Each OOD image is matched to its nearest STL-10 test image "
+            + cap
+            + " in the (mean luminance, contrast, log Laplacian variance) space.\n\n"
             + reporting.markdown_table(matched_rows(result))
             + "\n\nBalance of the matching statistics:\n\n"
             + reporting.markdown_table(balance_rows(result))
         ),
-        "analyze.svhn_control_overall": (
+        f"{prefix}_overall": (
             "### Overall reading (pre-registered rule)\n\n"
-            + reporting.markdown_table(overall_rows(result))
+            + reporting.markdown_table(overall_rows(result, study))
         ),
-        "analyze.svhn_control_single": (
+        f"{prefix}_single": (
             "### Single statistics (descriptive, point estimates)\n\n"
             + reporting.markdown_table(per_statistic_rows(result))
         ),
     }
+    if study.validity:
+        out[f"{prefix}_validity"] = (
+            "### Validity of the control (pre-registered V1 to V3)\n\n"
+            "The reading of the radius result is only valid where `valid` is `yes`: "
+            f"V1 statistics Mahalanobis AUROC at most {VALID_MAX_MAHAL_AUROC:g}, "
+            f"V2 absolute standardized mean difference below {VALID_MAX_ABS_SMD:g} on "
+            "each matching statistic, V3 the matching cap holds. Properties of the "
+            "data, identical for every lambda.\n\n"
+            + reporting.markdown_table(validity_rows(result, study))
+        )
+    return out
 
 
 def write_notes(
@@ -1207,6 +1445,7 @@ def write_notes(
     prefix: str,
     note: pathlib.Path,
     figures_on: bool,
+    study: Study = SVHN,
 ) -> list[pathlib.Path]:
     """Aggregates the unit files of runs `prefix_*` into one note per lambda.
 
@@ -1216,14 +1455,20 @@ def write_notes(
     units: list[Unit] = []
     missing: list[Row] = []
     for run in sweep.load_runs(locations.runs_dir, prefix):
-        unit_file = locations.runs_dir / run.name / UNIT_FILE
+        unit_file = locations.runs_dir / run.name / study.unit_file
         if unit_file.is_file():
             units.append(load_unit(unit_file))
         else:
-            missing.append({"run": run.name, "lambda": run.lam, "missing": UNIT_FILE})
+            missing.append(
+                {"run": run.name, "lambda": run.lam, "missing": study.unit_file}
+            )
     rng = numpy.random.default_rng(cfg.seed)
     results = evaluate(
-        units, load_image_stats(locations.runs_dir), cfg.eval.num_bootstrap, rng
+        units,
+        load_image_stats(locations.runs_dir, study),
+        cfg.eval.num_bootstrap,
+        rng,
+        study,
     )
     base = locations.notes_dir / note
     written: list[pathlib.Path] = []
@@ -1232,26 +1477,26 @@ def write_notes(
         mine = [r for r in missing if r["lambda"] == result.lam]
         reporting.update_section(
             path,
-            "analyze.svhn_control_inputs",
+            f"analyze.{study.name}_control_inputs",
             "### Inputs\n\nRuns aggregated: "
             + ", ".join(f"`{u.name}`" for u in units if u.lam == result.lam)
             + ".\n\nUnit files missing for this lambda:\n\n"
             + (reporting.markdown_table(mine) if mine else "None."),
         )
-        for name, content in sections(result, cfg).items():
+        for name, content in sections(result, cfg, study).items():
             reporting.update_section(path, name, content)
         if figures_on:
             links: list[str] = []
-            for stem, fig, alt in figures(result):
+            for stem, fig, alt in figures(result, study):
                 out = plotting.export_png(
                     fig,
-                    path.parent / f"svhn_control_lam{result.lam:g}_{stem}.png",
+                    path.parent / f"{study.name}_control_lam{result.lam:g}_{stem}.png",
                     locations.kaleido_chrome,
                 )
                 links.append(reporting.image_link(out, path, alt))
             reporting.update_section(
                 path,
-                "analyze.svhn_control_figures",
+                f"analyze.{study.name}_control_figures",
                 "### Figures\n\n" + "\n\n".join(links),
             )
         written.append(path)
