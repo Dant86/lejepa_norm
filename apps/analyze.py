@@ -71,8 +71,8 @@ With `--view-signal PREFIX` (needs `--config`), the radius view-signal study (ra
 vs tangential displacement under corruption, oracle clean radius, severity from the
 radius residual, radius-weighted multi-view aggregation; z only) is run: with
 `--view-signal-run RUN` one run's unit file is computed (STL-10-C with all views,
-needs about 64 GB), otherwise the units of the runs `PREFIX_*` are aggregated per lambda into
-`<note stem>_lam<lambda>.md` next to `--note`, which gets the cross-lambda summary
+needs about 64 GB), otherwise the units of the runs `PREFIX_*` are aggregated per
+lambda into `<note stem>_lam<lambda>.md` next to `--note`, which gets the cross-lambda summary
 (see `lejepa_norm.eval.view_signal`, `view_signal_stats`).
 
 With `--retrieval PREFIX`, Euclidean retrieval of z (class-level on the STL-10 center
