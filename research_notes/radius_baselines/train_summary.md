@@ -43,4 +43,17 @@ Note on the generated tables: the shared analysis code groups runs by `loss.lamb
 
 ## Results
 
-(Generated sections are added below after the runs finish.)
+Numbers are copied from the per-run notes (generated there by `analyze --redundancy-controls` and `--randomize-radius`); one seed each; z only.
+
+| run | z k-NN acc (gate 0.55) | same-view R^2 (null ~ 0) | disjoint halves R^2 | split-half reliability | pre-registered reading |
+|---|---|---|---|---|---|
+| LeJEPA lambda 0.05 (reference) | 0.78-0.79 | 0.945 | 0.86 | 0.93 | reference |
+| `baseline_simclr_s0` | 0.7815 | 0.684 | 0.60 | 0.819 | mixed (0.50 < R^2 < 0.85); one seed |
+| `baseline_vicreg_s0` | 0.7494 | 0.990 | 0.95 | 0.971 | generic (>= 0.85) |
+| `baseline_supervised_s0` | 0.7955 | 0.929 | 0.65 | 0.684 | descriptive only |
+
+Usage (equivalence margin 0.5): SimCLR and supervised: linear/MLP readers equivalent under permute/residual shuffle (one small positive `different`, +0.29, for SimCLR retrained linear residual shuffle); VICReg: residual shuffle equivalent for linear/MLP, but permute gives small `different` effects (linear -0.46 / -0.31) and frozen k-NN -5.25. Euclidean k-NN gains from removing the radius after retraining for SimCLR (+1.0 to +2.3) and VICReg constant (+0.70), as for LeJEPA. Frozen constant radius collapses every reader in every run (scale mismatch, not radius use).
+
+Reading: the radius is substantially predictable from the direction in every trained baseline, strongest for VICReg (0.99) and weaker for SimCLR (0.68), so the redundancy is not specific to LeJEPA/SIGReg; it is not a unique SIGReg signature. VICReg is the only baseline where destroying the direction-radius link measurably (if slightly) hurts linear readers. One seed per baseline, one temperature/coefficient set, one backbone.
+
+Per-run notes: `train_simclr.md`, `train_vicreg.md`, `train_supervised.md`.
