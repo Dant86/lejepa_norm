@@ -17,6 +17,7 @@ over all corruptions and, for part D, `CLEAN_TEST` (the uncorrupted images).
 
 import dataclasses
 import statistics
+import typing
 
 import numpy
 import numpy.typing
@@ -100,6 +101,21 @@ AGGREGATION_CONTRASTS = (
     Contrast(
         "bottom-radius view - random single view (post hoc)",
         view_signal.AGG_BOTTOM,
+        view_signal.AGG_FIRST,
+    ),
+    Contrast(
+        "highest-residual view - lowest-residual view (post hoc)",
+        view_signal.AGG_TOP_RESIDUAL,
+        view_signal.AGG_BOTTOM_RESIDUAL,
+    ),
+    Contrast(
+        "highest-residual view - random single view (post hoc)",
+        view_signal.AGG_TOP_RESIDUAL,
+        view_signal.AGG_FIRST,
+    ),
+    Contrast(
+        "lowest-residual view - random single view (post hoc)",
+        view_signal.AGG_BOTTOM_RESIDUAL,
         view_signal.AGG_FIRST,
     ),
 )
@@ -298,9 +314,14 @@ def geometry_rows(
 
     `F_rad = sum a^2 / sum (a^2 + t^2)` over images and the level's cells (ratio of
     sums), seed mean, 95% bootstrap interval over images; the median `r_x / r_c`;
-    and the null row (clean image -> a different clean image).
+    and the null row (clean image -> a different clean image). Post hoc columns:
+    the radius-change share `sum (r_x - r_c)^2 / sum (a^2 + t^2)` (the part of the
+    squared displacement a pure change of radius explains) with its interval, and
+    the median cosine between `u_x` and `u_c`.
     """
     rows: list[Row] = []
+    rad, tan = view_signal.GEOM_RADIAL, view_signal.GEOM_TANGENTIAL
+    change, cosine = view_signal.GEOM_RADIUS_CHANGE, view_signal.GEOM_COSINE
     for lam in sorted({u.lam for u in units}):
         group = _group(units, lam)
         num_images = len(next(iter(group[0].image_id.values())))
@@ -309,55 +330,61 @@ def geometry_rows(
         )
 
         def share(
-            radial: list[FloatArray],
+            numer: list[FloatArray],
             total: list[FloatArray],
             draws: list[IntArray] = draws,
         ) -> tuple[str, str]:
             boot = randomization.bootstrap_seed_mean(
                 draws,
-                lambda s, idx: radial[s][idx].sum(axis=1) / total[s][idx].sum(axis=1),
+                lambda s, idx: numer[s][idx].sum(axis=1) / total[s][idx].sum(axis=1),
             )
             _, (lo, hi) = randomization.intervals(boot)
             point = statistics.fmean(
-                float(r.sum() / t.sum()) for r, t in zip(radial, total, strict=True)
+                float(r.sum() / t.sum()) for r, t in zip(numer, total, strict=True)
             )
             return f"{point:.4f}", f"[{lo:.4f}, {hi:.4f}]"
 
-        lv = levels(group[0])
-        for level, cells in lv.items():
-            radial = [
-                numpy.sum([u.geometry[c][0] for c in cells], axis=0) for u in group
-            ]
-            total = [
-                numpy.sum([u.geometry[c][:2].sum(axis=0) for c in cells], axis=0)
-                for u in group
-            ]
-            point, ci = share(radial, total)
+        def row_for(
+            level: str,
+            geoms: list[list[FloatArray]],
+            label: str,
+            lam: float = lam,
+        ) -> Row:
+            """`geoms[seed]` = the (5, N) arrays pooled by the level."""
+            pooled = [numpy.sum(g, axis=0) for g in geoms]
+            total = [p[rad] + p[tan] for p in pooled]
+            f_rad, f_ci = share([p[rad] for p in pooled], total)
+            c_share, c_ci = share([p[change] for p in pooled], total)
             ratio = statistics.fmean(
-                float(numpy.exp(numpy.median([u.geometry[c][2] for c in cells])))
-                for u in group
+                float(
+                    numpy.exp(numpy.median([g[view_signal.GEOM_LOG_RATIO] for g in gs]))
+                )
+                for gs in geoms
             )
-            rows.append(
-                {
-                    "lambda": lam,
-                    "level": level,
-                    "radial share F_rad": point,
-                    "95% CI": ci,
-                    "median r_x / r_c": f"{ratio:.3f}",
-                }
+            cos = statistics.fmean(
+                float(numpy.median([g[cosine] for g in gs])) for gs in geoms
             )
-        point, ci = share(
-            [u.null_geometry[0] for u in group],
-            [u.null_geometry[0] + u.null_geometry[1] for u in group],
-        )
-        rows.append(
-            {
+            return {
                 "lambda": lam,
-                "level": "null: clean image -> other clean image",
-                "radial share F_rad": point,
-                "95% CI": ci,
-                "median r_x / r_c": "",
+                "level": label or level,
+                "radial share F_rad": f_rad,
+                "95% CI": f_ci,
+                "median r_x / r_c": f"{ratio:.3f}" if label == "" else "",
+                "radius-change share (post hoc)": c_share,
+                "95% CI (radius change)": c_ci,
+                "median cos(u_x, u_c) (post hoc)": f"{cos:.3f}",
             }
+
+        for level, cells in levels(group[0]).items():
+            rows.append(
+                row_for(level, [[u.geometry[c] for c in cells] for u in group], "")
+            )
+        rows.append(
+            row_for(
+                "null",
+                [[u.null_geometry] for u in group],
+                "null: clean image -> other clean image",
+            )
         )
     return rows
 
@@ -365,23 +392,40 @@ def geometry_rows(
 def geometry_cell_rows(units: list[view_signal.ViewSignalUnit]) -> list[Row]:
     """Radial share per cell, seed mean (point estimates only)."""
     rows: list[Row] = []
+    rad, tan = view_signal.GEOM_RADIAL, view_signal.GEOM_TANGENTIAL
+    change, cosine = view_signal.GEOM_RADIUS_CHANGE, view_signal.GEOM_COSINE
+
+    def mean(
+        geoms: list[FloatArray], fn: typing.Callable[[FloatArray], float]
+    ) -> float:
+        return statistics.fmean(fn(g) for g in geoms)
+
+    def share(g: FloatArray, row: int) -> float:
+        return float(g[row].sum() / (g[rad] + g[tan]).sum())
+
+    def median_of(g: FloatArray, row: int) -> float:
+        return float(numpy.median(g[row]))
+
     for lam in sorted({u.lam for u in units}):
         group = _group(units, lam)
         for cell in group[0].cells():
-            share = statistics.fmean(
-                float(u.geometry[cell][0].sum() / (u.geometry[cell][:2].sum()))
-                for u in group
-            )
-            ratio = statistics.fmean(
-                float(numpy.exp(numpy.median(u.geometry[cell][2]))) for u in group
+            geoms = [u.geometry[cell] for u in group]
+            ratio = numpy.exp(
+                mean(geoms, lambda g: median_of(g, view_signal.GEOM_LOG_RATIO))
             )
             rows.append(
                 {
                     "lambda": lam,
                     "corruption": cell[0],
                     "severity": cell[1],
-                    "radial share F_rad": f"{share:.4f}",
+                    "radial share F_rad": f"{mean(geoms, lambda g: share(g, rad)):.4f}",
                     "median r_x / r_c": f"{ratio:.3f}",
+                    "radius-change share (post hoc)": (
+                        f"{mean(geoms, lambda g: share(g, change)):.4f}"
+                    ),
+                    "median cos(u_x, u_c) (post hoc)": (
+                        f"{mean(geoms, lambda g: median_of(g, cosine)):.3f}"
+                    ),
                 }
             )
     return rows

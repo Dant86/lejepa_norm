@@ -108,6 +108,14 @@ def test_displacement_geometry_separates_radial_from_tangential(
     assert rescale == pytest.approx(1.0, abs=1e-6)  # x = c / 20: purely radial
     assert jitter < 0.5 and 0.0 < null < rescale
     assert float(rows["rescale", 0.05]["median r_x / r_c"]) == pytest.approx(0.05)
+    # Post hoc: a pure rescaling is entirely a radius change, direction noise is not.
+    assert float(rows["rescale", 0.05]["radius-change share (post hoc)"]) == (
+        pytest.approx(1.0, abs=1e-6)
+    )
+    assert float(rows["jitter", 0.05]["radius-change share (post hoc)"]) < 0.05
+    assert float(rows["rescale", 0.05]["median cos(u_x, u_c) (post hoc)"]) == (
+        pytest.approx(1.0, abs=1e-6)
+    )
 
 
 def test_oracle_radius_recovers_a_radius_shift_but_not_direction_noise(
@@ -157,6 +165,10 @@ def test_aggregation_schemes_and_comparisons(
         view_signal.effective_number(weights[view_signal.AGG_MEAN]), [3.0, 3.0]
     )
     assert units[0].effective_views[view_signal.AGG_TOP] == 1.0
+    assert units[0].effective_views[view_signal.AGG_TOP_RESIDUAL] == 1.0
+    picks = view_signal.aggregation_weights(r, numpy.array([[0.1, 0.5, -0.2]] * 2), 1.0)
+    assert picks[view_signal.AGG_TOP_RESIDUAL][0].argmax() == 1
+    assert picks[view_signal.AGG_BOTTOM_RESIDUAL][0].argmax() == 2
     assert 1.0 < units[0].effective_views[view_signal.AGG_RADIUS] <= VIEWS
     # Weights scaled by a constant leave the aggregated direction unchanged.
     u = features.direction(numpy.random.default_rng(1).normal(size=(2, 3, D)))

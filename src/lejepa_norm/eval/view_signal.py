@@ -69,6 +69,11 @@ AGG_CENTER = "center view only (context)"
 # are i.i.d. augmentations, so view 1 is a random view; the reference for "is the
 # top / bottom radius view better / worse than a random single view".
 AGG_FIRST = "random single view (post hoc context)"
+# Also post hoc: single views picked by the radius *residual* (the part of the radius
+# that the direction does not predict), to separate "the radius ranks views" from
+# "the direction-predictable radius ranks views".
+AGG_TOP_RESIDUAL = "highest-residual view (post hoc)"
+AGG_BOTTOM_RESIDUAL = "lowest-residual view (post hoc)"
 AGGREGATIONS = (
     AGG_MEAN,
     AGG_RADIUS,
@@ -78,6 +83,8 @@ AGGREGATIONS = (
     AGG_BOTTOM,
     AGG_CENTER,
     AGG_FIRST,
+    AGG_TOP_RESIDUAL,
+    AGG_BOTTOM_RESIDUAL,
 )
 
 # Part C models.
@@ -121,8 +128,8 @@ class ViewSignalUnit:
         lam: SIGReg weight.
         seed: Training seed.
         image_id: Per cell, the `image_id` of every row (alignment check).
-        geometry: Per corrupted cell, float `(3, N)`: `a^2`, `t^2`, `log(r_x/r_c)`.
-        null_geometry: `(2, N)`: `a^2`, `t^2` of the clean-to-other-image null.
+        geometry: Per corrupted cell, float `(5, N)` (`GEOM_*` rows).
+        null_geometry: `(5, N)`: the same rows for the clean-to-other-image null.
         correct: Per (reader, condition, corruption, severity), the per-image
             correctness `(N,)` of parts B (`ORACLE_CONDITIONS`) and D
             (`AGGREGATIONS`); the clean test set is the cell `(CLEAN, 0)`.
@@ -233,11 +240,18 @@ def load_unit(path: str | os.PathLike[str]) -> ViewSignalUnit:
         )
 
 
+# Rows of the per-image geometry arrays (`displacement_parts`).
+GEOM_RADIAL, GEOM_TANGENTIAL, GEOM_LOG_RATIO, GEOM_RADIUS_CHANGE, GEOM_COSINE = range(5)
+
+
 def displacement_parts(x: FloatArray, clean: FloatArray) -> FloatArray:
     """Radial and tangential split of `x - clean` along the clean direction.
 
     Returns:
-        `(3, N)`: `a^2`, `t^2` and `log(||x|| / ||clean||)` per row.
+        `(5, N)` rows (see `GEOM_*`): `a^2`, `t^2`, `log(||x|| / ||clean||)`, and,
+        added post hoc, `(||x|| - ||clean||)^2` (the part of `||x - clean||^2` that
+        a pure change of radius would explain; at most `a^2 + t^2`) and the cosine
+        between the two directions.
     """
     d = x - clean
     u_clean = features.direction(clean)
@@ -248,8 +262,16 @@ def displacement_parts(x: FloatArray, clean: FloatArray) -> FloatArray:
             a * a,
             numpy.maximum(total - a * a, 0.0),
             features.log_radius(x) - features.log_radius(clean),
+            numpy.square(features.radius(x) - features.radius(clean)),
+            numpy.einsum("nd,nd->n", features.direction(x), u_clean),
         ]
     )
+
+
+def _one_hot(index: IntArray, size: int) -> FloatArray:
+    out = numpy.zeros((index.size, size))
+    out[numpy.arange(index.size), index] = 1.0
+    return out
 
 
 def aggregation_weights(
@@ -267,6 +289,8 @@ def aggregation_weights(
         AGG_RESIDUAL: numpy.exp(-numpy.abs(res) / residual_sd),
         AGG_TOP: top,
         AGG_BOTTOM: bottom,
+        AGG_TOP_RESIDUAL: _one_hot(res.argmax(axis=1), r.shape[1]),
+        AGG_BOTTOM_RESIDUAL: _one_hot(res.argmin(axis=1), r.shape[1]),
     }
 
 
@@ -392,7 +416,7 @@ def evaluate_unit(
     effective: dict[str, list[float]] = {s: [] for s in AGGREGATIONS}
 
     perm = numpy.random.default_rng([seed, 7]).permutation(clean_x.shape[0])
-    null_geometry = displacement_parts(clean_x[perm], clean_x)[:2]
+    null_geometry = displacement_parts(clean_x[perm], clean_x)
 
     def store(
         reader: str,
