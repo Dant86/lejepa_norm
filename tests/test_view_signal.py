@@ -216,6 +216,11 @@ def test_severity_models_and_unit_round_trip(
         atol=1e-5,
     )
     assert back.residual_sd == pytest.approx(units[0].residual_sd)
+    # Model names contain the key separator ("|res|"): they must survive the file.
+    assert (
+        back.severity_rows["rescale"].prediction.keys()
+        == units[0].severity_rows["rescale"].prediction.keys()
+    )
 
 
 def test_view_shard_loading_drops_h_and_keeps_every_view(

@@ -206,7 +206,10 @@ def load_unit(path: str | os.PathLike[str]) -> ViewSignalUnit:
             elif p[0] == "vh":
                 rho[p[1]] = arrays[name].astype(numpy.float64)
             elif p[0] == "vp":
-                pred.setdefault(p[1], {})[p[2]] = arrays[name].astype(numpy.float64)
+                # The model name may contain the separator.
+                pred.setdefault(p[1], {})[SEP.join(p[2:])] = arrays[name].astype(
+                    numpy.float64
+                )
             elif p[0] == "e":
                 effective[p[1]] = float(arrays[name])
         return ViewSignalUnit(
