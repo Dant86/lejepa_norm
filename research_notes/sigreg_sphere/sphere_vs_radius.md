@@ -32,6 +32,13 @@ Training health (reported, not predicted): 200 epochs completed with finite loss
 
 `loss.radius_free=true` only. Runs `sigreg_sphere_lam0.05_s{0,1,2}`, trained with the sweep template in parallel; GPU types and job ids below.
 
+### Run log (job ids, failure)
+
+- Training array `2247702_{0,1,2}` (submitted `LAMBDAS="0.05" SEEDS="0 1 2" sbatch --export=ALL --array=0-2 slurm/sweep.sbatch configs/base.yaml sigreg_sphere --set loss.radius_free=true`), embeds `2247734-36` (afterok on the matching task), per-run units `2248021-23` (`apps/analyze.py --compare-prefix sigreg_sphere --baseline-prefix radius_marginal --compare-unit RUN`, 1 GPU).
+- **Failure:** task `2247702_2` (seed 2) FAILED at epoch 70 (~2026-10-26T02:15Z, node m002) with `RuntimeError` in `torch.save` of `last.pt.tmp` (a transient filesystem write error; the disk was not full). `resume.pt` and `epoch_0070.pt` were intact; the stale `last.pt.tmp` was removed by hand. Embed `2247736`, unit `2248023` and the aggregate `2248024` were cancelled (dependency never satisfiable).
+- **Resubmission:** training `2252442` (`LAMBDAS="0.05" SEEDS="0 1 2" sbatch --export=ALL --array=2 slurm/sweep.sbatch configs/base.yaml sigreg_sphere --set loss.radius_free=true`, resumes from `resume.pt` at epoch 70), embed `2252443`, unit `2252444`, aggregate `2252446` (`--compare-prefix sigreg_sphere --baseline-prefix radius_marginal --note sigreg_sphere/sphere_vs_radius.md`). Seed 2 is therefore a resumed run (resume from a mid-run checkpoint; CUDA non-determinism may differ at float level).
+- Follow-up code change: `checkpoint.save` now retries a failed write (3 attempts); it was not active in the failed job.
+
 ## Results
 
 ## Interpretation
