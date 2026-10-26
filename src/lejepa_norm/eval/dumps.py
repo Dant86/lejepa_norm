@@ -9,8 +9,10 @@ evaluation set; each directory holds any number of `.npz` shards
 Evaluation sets (see `EVAL_SETS`): `stl10_train` (labeled bank for probes and
 k-NN), `stl10_test` (clean test images), `stl10c` (STL-10 `test` under
 corruptions; `image_id` indexes `stl10_test`, `corruption`/`severity` set per
-image), `dtd_test` and `svhn_test` (OOD sets). Sets that are missing on disk
-are skipped by the analyses that need them.
+image), `dtd_test` and `svhn_test` (OOD sets) and `places_test` (Places365
+validation downsampled to 96x96; the OOD set of the Places control, not part of
+`OOD_SETS`, which the shift study loops over). Sets that are missing on disk are
+skipped by the analyses that need them.
 """
 
 import os
@@ -27,7 +29,8 @@ STL10_TEST = "stl10_test"
 STL10_C = "stl10c"
 DTD_TEST = "dtd_test"
 SVHN_TEST = "svhn_test"
-EVAL_SETS = (STL10_TRAIN, STL10_TEST, STL10_C, DTD_TEST, SVHN_TEST)
+PLACES_TEST = "places_test"
+EVAL_SETS = (STL10_TRAIN, STL10_TEST, STL10_C, DTD_TEST, SVHN_TEST, PLACES_TEST)
 OOD_SETS = (DTD_TEST, SVHN_TEST)
 
 

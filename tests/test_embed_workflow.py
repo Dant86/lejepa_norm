@@ -28,7 +28,13 @@ import tiny_backbone
 REPO = pathlib.Path(__file__).parent.parent
 RUN = "fake_run"
 K, D_Z, D_H = 3, 8, 512
-SIZES = {"stl10_train": 7, "stl10_test": 6, "dtd_test": 5, "svhn_test": 4}
+SIZES = {
+    "stl10_train": 7,
+    "stl10_test": 6,
+    "dtd_test": 5,
+    "svhn_test": 4,
+    "places_test": 3,
+}
 CORRUPTIONS = {"fog": (1, 3), "noise": (2,)}
 
 
@@ -58,6 +64,7 @@ def _fake_data(root: pathlib.Path) -> None:
         ("stl10", "test"): SIZES["stl10_test"],
         ("dtd", "test"): SIZES["dtd_test"],
         ("svhn", "test"): SIZES["svhn_test"],
+        ("places365", "val"): SIZES["places_test"],
     }
     for (dataset, split), n in splits.items():
         _save_array(layout.images_path(root, dataset, split), images(n))

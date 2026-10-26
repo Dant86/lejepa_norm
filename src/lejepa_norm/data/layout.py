@@ -9,7 +9,8 @@ memory-mapped; labels are int64 arrays of shape `(N,)`.
     <data_dir>/stl10c/<corruption>/<severity>/images.npy   # labels: stl10 test
 
 Datasets: `stl10` (splits `unlabeled`, `train`, `test`), `dtd` (`test`),
-`svhn` (`test`; resized to 96x96 at build time).
+`svhn` (`test`; resized to 96x96 at build time), `places365` (`val`; downsampled
+from 256x256 to 96x96 at build time).
 """
 
 import os
