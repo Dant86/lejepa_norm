@@ -198,7 +198,7 @@ def test_radius_free_flag_off_is_bit_identical_and_default_is_off() -> None:
 def test_radius_free_loss_sees_constant_norm_and_ignores_the_radius() -> None:
     views = _views(torch.randn(6, 64, DIM, generator=_gen(41)))
     sphere = lejepa.project_to_sphere(views)
-    norms = sphere.z.norm(dim=-1)
+    norms = sphere.z.square().sum(dim=-1).sqrt()
     torch.testing.assert_close(norms, torch.full_like(norms, math.sqrt(DIM)))
     assert torch.equal(sphere.is_global, views.is_global)
 
@@ -219,5 +219,7 @@ def test_radius_free_gradients_flow_and_are_tangent_to_the_sphere() -> None:
     (grad,) = torch.autograd.grad(total, z)
     assert torch.isfinite(grad).all() and float(grad.abs().sum()) > 0
     # The radius carries no gradient: d loss / d z is orthogonal to z.
-    radial = (grad * z.detach()).sum(dim=-1) / z.detach().norm(dim=-1)
-    assert float(radial.abs().max()) < 1e-4 * float(grad.norm(dim=-1).max())
+    zd = z.detach()
+    radial = (grad * zd).sum(dim=-1) / zd.square().sum(dim=-1).sqrt()
+    peak = grad.square().sum(dim=-1).sqrt().max()
+    assert float(torch.abs(radial).max()) < 1e-4 * float(peak)
