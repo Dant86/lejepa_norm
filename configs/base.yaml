@@ -55,3 +55,9 @@ eval:
   num_randomizations: 5
   # Equivalence margin (accuracy units) for the same analysis, set before seeing results.
   equivalence_margin: 0.005
+  # E2 controls (`analyze --baseline-controls`): random smooth functions per family,
+  # held-out images of the learning curve, and its saturation margin (R^2 units),
+  # fixed before any curve was computed.
+  smooth_draws: 50
+  curve_holdout: 2000
+  curve_margin: 0.01
