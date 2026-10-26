@@ -182,3 +182,42 @@ def test_loss_does_not_penalize_views_of_an_image_for_agreeing() -> None:
     assert float(stats["inv"]) == pytest.approx(0.0, abs=1e-6)
     # The pooled statistic is what the old loss used; it is far above the floor.
     assert float(_sigreg(1)(identical.reshape(-1, DIM))) > 4 * floor
+
+
+def test_radius_free_flag_off_is_bit_identical_and_default_is_off() -> None:
+    assert config.LossConfig().radius_free is False
+    views = _views(torch.randn(6, 64, DIM, generator=_gen(40)) * 3.0)
+    cfg = config.LossConfig(num_slices=128)
+    old, stats_old = lejepa.LeJEPALoss(cfg, generator=_gen(1))(views)
+    explicit = config.LossConfig(num_slices=128, radius_free=False)
+    new, stats_new = lejepa.LeJEPALoss(explicit, generator=_gen(1))(views)
+    assert torch.equal(old, new)
+    assert all(torch.equal(stats_old[k], stats_new[k]) for k in stats_old)
+
+
+def test_radius_free_loss_sees_constant_norm_and_ignores_the_radius() -> None:
+    views = _views(torch.randn(6, 64, DIM, generator=_gen(41)))
+    sphere = lejepa.project_to_sphere(views)
+    norms = sphere.z.norm(dim=-1)
+    torch.testing.assert_close(norms, torch.full_like(norms, math.sqrt(DIM)))
+    assert torch.equal(sphere.is_global, views.is_global)
+
+    cfg = config.LossConfig(num_slices=128, radius_free=True)
+    # Rescaling every embedding (any per-sample radius) leaves the loss unchanged.
+    scale = 0.5 + 3.0 * torch.rand(6, 64, 1, generator=_gen(42))
+    rescaled = _views(views.z * scale)
+    a, stats = lejepa.LeJEPALoss(cfg, generator=_gen(1))(views)
+    b, _ = lejepa.LeJEPALoss(cfg, generator=_gen(1))(rescaled)
+    torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-5)
+    assert float(stats["kappa"]) == pytest.approx(0.0, abs=1e-4)
+
+
+def test_radius_free_gradients_flow_and_are_tangent_to_the_sphere() -> None:
+    z = torch.randn(6, 32, DIM, generator=_gen(43)).requires_grad_()
+    cfg = config.LossConfig(num_slices=128, radius_free=True)
+    total, _ = lejepa.LeJEPALoss(cfg, generator=_gen(1))(_views(z))
+    (grad,) = torch.autograd.grad(total, z)
+    assert torch.isfinite(grad).all() and float(grad.abs().sum()) > 0
+    # The radius carries no gradient: d loss / d z is orthogonal to z.
+    radial = (grad * z.detach()).sum(dim=-1) / z.detach().norm(dim=-1)
+    assert float(radial.abs().max()) < 1e-4 * float(grad.norm(dim=-1).max())
