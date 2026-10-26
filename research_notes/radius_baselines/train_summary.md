@@ -65,3 +65,27 @@ Usage (equivalence margin 0.5): SimCLR and supervised: linear/MLP readers equiva
 Reading: the radius is substantially predictable from the direction in every trained baseline, strongest for VICReg (0.99) and weaker for SimCLR (0.68), so the redundancy is not specific to LeJEPA/SIGReg; it is not a unique SIGReg signature. VICReg is the only baseline where destroying the direction-radius link measurably (if slightly) hurts linear readers. One seed per baseline, one temperature/coefficient set, one backbone.
 
 Per-run notes: `train_simclr.md`, `train_vicreg.md`, `train_supervised.md`.
+
+## Results: z vs h (explicit exception to the z-only rule, per the addendum)
+
+**Caveats:** deviation from the z-only rule, scoped to the E2 baselines; 1 seed each; the LeJEPA row is a *secondary reference only* (LeJEPA's product is z, its h is not its product; redundancy seed 0, randomization 3 seeds). Redundancy numbers come from the same `--redundancy-controls` runs as the z results (the h block of `train_<run>.md`, jobs 2247712-14; LeJEPA h: `h_lejepa_ref.md`, job 2252608); that block had been generated before the addendum, as disclosed there. Randomization on h: `h_<run>.md` (jobs 2252605-07, 2252609; code: `analyze --space h`).
+
+**Hypothesis under test:** SimCLR's low z same-view R^2 (0.684) is because z is not the representation used.
+
+| run | z same-view R^2 | h same-view R^2 | z disjoint halves | h disjoint halves | h split-half reliability | h reading (bands 0.50 / 0.85) |
+|---|---|---|---|---|---|---|
+| SimCLR | 0.684 | **0.869** | 0.60 | 0.75 | 0.856 | >= 0.85: generic |
+| VICReg | 0.990 | 0.956 | 0.95 | 0.90 | 0.937 | generic |
+| supervised | 0.929 | 0.950 | 0.65 | 0.57 | 0.576 | descriptive only |
+| LeJEPA lam 0.05 s0 (reference, h not its product) | 0.946 | 0.925 | 0.86 | 0.79 | 0.858 | generic |
+
+**Hypothesis verdict:** supported for the pre-registered statistic. SimCLR's h same-view R^2 is 0.869 (z 0.684): h clears the 0.85 band, so the gap is largely a property of z, not of the radius being unpredictable. Two qualifications: 0.869 is only just above 0.85 for one seed, and the disjoint-halves value (0.75) sits below that run's own reliability (0.856), so the cross-view redundancy of SimCLR's h (0.75; single-view-to-other-view 0.52) is weaker than LeJEPA's z or VICReg's h. Same-view R^2 can include view-specific structure shared between input and target. h does not turn SimCLR into a VICReg-like case on the cross-view measures.
+
+**Usage on h (margin 0.5; retrained / frozen protocols; generated in `h_<run>.md`):**
+- SimCLR: every linear and MLP cell and Euclidean k-NN permute / residual-shuffle is `equivalent`; k-NN retrained constant radius +0.45 `inconclusive`. Unlike on z (where retrained k-NN gained 1-2 points from removing the radius and residual shuffle on the linear probe was +0.29 `different`), nothing is detectable on h.
+- VICReg: linear/MLP retrained all equivalent; frozen permute -0.39 (linear) and -0.56 (MLP) `different`; k-NN gains +1.28 (retrained constant radius) and is `different` in frozen permute (+0.62) and residual (+0.33). Small effects, mixed.
+- Supervised: all linear/MLP equivalent; k-NN retrained inconclusive (-0.28 to -0.39), frozen permute -0.42 `different`.
+- LeJEPA h (reference): all linear/MLP equivalent; k-NN retrained permute -0.42 `different`, otherwise equivalent.
+- Frozen constant radius collapses every reader in every run (-35 to -70): norm mismatch (h norms are far from 1), not radius use.
+
+**Bottom line:** for all three baselines, and for LeJEPA's h, the radius of h is as predictable from the direction as that of z (SimCLR clearly more so), and the linear/MLP readers do not use it beyond 0.5 points except VICReg's frozen-permute cells. The z-only conclusion that the redundancy is not specific to LeJEPA stands on h, and SimCLR's lower z value is explained mostly by z being a discarded projector output.
