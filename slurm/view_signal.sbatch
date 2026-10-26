@@ -48,4 +48,4 @@ export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 set -x
 run_preemptable "${PYTHON}" apps/analyze.py --config "${CONFIG}" \
-  --view-signal "${PREFIX}" --run-name "${RUN_NAME}" "$@"
+  --view-signal "${PREFIX}" --view-signal-run "${RUN_NAME}" "$@"

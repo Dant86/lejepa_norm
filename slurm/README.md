@@ -13,7 +13,7 @@ preemption: [batch-jobs guide](https://cluster-policy.ds.uchicago.edu/using-the-
 | `analyze_epochs.sbatch` | `apps/analyze.py --epoch-unit` as a job array, one (run, epoch) per task, JSON shard each; aggregate with `--epoch-sweep` | CPU, 8 | skips finished shards |
 | `analyze.sbatch` | `apps/analyze.py` | CPU | recomputes (idempotent) |
 | `lowlabel.sbatch` | `apps/analyze.py --lowlabel PREFIX --lowlabel-run RUN` | CPU (4) | recomputes the run (shard written atomically) |
-| `view_signal.sbatch` | `apps/analyze.py --view-signal PREFIX --run-name RUN` (64 GB: STL-10-C with all views) | CPU (8) | recomputes the run (unit file written atomically) |
+| `view_signal.sbatch` | `apps/analyze.py --view-signal PREFIX --view-signal-run RUN` (64 GB: STL-10-C with all views) | CPU (8) | recomputes the run (unit file written atomically) |
 | `frozen_linear.sbatch` | `apps/analyze.py --frozen-linear` (array, one run per task) | CPU | skips finished shards |
 
 All templates request `--partition=general --qos=general --time=12:00:00`

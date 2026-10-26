@@ -70,8 +70,8 @@ bootstrap over images, mean over seeds) into `<note stem>_lam<lambda>.md` next t
 With `--view-signal PREFIX` (needs `--config`), the radius view-signal study (radial
 vs tangential displacement under corruption, oracle clean radius, severity from the
 radius residual, radius-weighted multi-view aggregation; z only) is run: with
-`--run-name` one run's unit file is computed (STL-10-C with all views, needs about
-64 GB), otherwise the units of the runs `PREFIX_*` are aggregated per lambda into
+`--view-signal-run RUN` one run's unit file is computed (STL-10-C with all views,
+needs about 64 GB), otherwise the units of the runs `PREFIX_*` are aggregated per lambda into
 `<note stem>_lam<lambda>.md` next to `--note`, which gets the cross-lambda summary
 (see `lejepa_norm.eval.view_signal`, `view_signal_stats`).
 
@@ -210,6 +210,15 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "without it aggregates the shards into --note.",
     )
     mode.add_argument(
+        "--view-signal",
+        metavar="PREFIX",
+        help="Radius view-signal study (`lejepa_norm.eval.view_signal`; needs "
+        "--config): with --view-signal-run compute one run's unit "
+        "(`<runs_dir>/<run>/view_signal.npz`, STL-10-C with all views, ~64 GB), "
+        "otherwise aggregate the units of runs PREFIX_* per lambda into "
+        "`<note stem>_lam<lambda>.md` plus a summary in --note.",
+    )
+    mode.add_argument(
         "--lowlabel",
         metavar="PREFIX",
         help="E1 readers with a small labeled bank for runs PREFIX_* (needs "
@@ -342,13 +351,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: compute the use-under-shift outcomes of the run.",
     )
     parser.add_argument(
-        "--view-signal",
-        metavar="PREFIX",
-        help="Radius view-signal study (`lejepa_norm.eval.view_signal`; needs "
-        "--config): with --run-name compute one run's unit "
-        "(`<runs_dir>/<run>/view_signal.npz`, STL-10-C with all views, ~64 GB), "
-        "otherwise aggregate the units of runs PREFIX_* per lambda into "
-        "`<note stem>_lam<lambda>.md` plus a summary in --note.",
+        "--view-signal-run",
+        help="With --view-signal: compute only this run's unit file.",
     )
     parser.add_argument(
         "--shift-part",
@@ -379,7 +383,7 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         or args.power_unit
         or args.power_list_units
         or args.shift_unit
-        or (args.view_signal is not None and args.run_name is not None)
+        or args.view_signal_run
         or args.retrieval_run
         or args.lowlabel_run
         or args.frozen_run
@@ -1337,8 +1341,8 @@ def _run_shift_unit(args: argparse.Namespace) -> int:
 def _run_view_signal(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
-    if args.run_name is not None:
-        out = usage_view_signal.run_unit(cfg, locations, args.run_name, _stderr)
+    if args.view_signal_run is not None:
+        out = usage_view_signal.run_unit(cfg, locations, args.view_signal_run, _stderr)
         print(f"wrote {out}")
         return 0
     written = usage_view_signal.write_notes(
