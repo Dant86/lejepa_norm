@@ -322,6 +322,49 @@ def scatter(
     return fig
 
 
+def bar_plot(
+    values: collections.abc.Mapping[str, tuple[float, float, float]],
+    title: str,
+    x_title: str,
+    reference: float | None = None,
+) -> go.Figure:
+    """Horizontal bars with asymmetric CI error bars.
+
+    Args:
+        values: Label to `(value, low, high)`; the first label is drawn at the top.
+        title: Figure title.
+        x_title: Value axis title.
+        reference: Optional vertical reference line (e.g. chance level).
+
+    Returns:
+        The figure.
+    """
+    labels = list(values)
+    fig = _figure(title, x_title, "")
+    fig.add_trace(
+        go.Bar(
+            x=[values[k][0] for k in labels],
+            y=labels,
+            orientation="h",
+            marker={"color": COLORS[0]},
+            error_x={
+                "type": "data",
+                "symmetric": False,
+                "array": [values[k][2] - values[k][0] for k in labels],
+                "arrayminus": [values[k][0] - values[k][1] for k in labels],
+                "thickness": 1,
+                "width": 3,
+            },
+            showlegend=False,
+        )
+    )
+    fig.update_yaxes(autorange="reversed", automargin=True)
+    fig.update_layout(width=WIDTH + 400, margin={"l": 360})
+    if reference is not None:
+        fig.add_vline(x=reference, line={"color": MUTED_COLOR, "dash": "dot"})
+    return fig
+
+
 def _kaleido_options(chrome: str | os.PathLike[str] | None) -> dict[str, typing.Any]:
     opts: dict[str, typing.Any] = {"mathjax": False}
     if chrome is not None:

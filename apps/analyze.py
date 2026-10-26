@@ -119,6 +119,12 @@ Examples:
         --run-name radius_marginal_lam0.05_s0 --shift-unit
     python apps/analyze.py --config configs/base.yaml --shift radius_marginal \
         --note radius_usage/shift.md
+    python apps/analyze.py --config configs/base.yaml --svhn-control radius_marginal \
+        --svhn-control-stats
+    python apps/analyze.py --config configs/base.yaml --svhn-control radius_marginal \
+        --svhn-control-run radius_marginal_lam0.05_s0
+    python apps/analyze.py --config configs/base.yaml --svhn-control radius_marginal \
+        --note radius_usage/svhn_control.md
     python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
         --retrieval-run radius_marginal_lam0.05_s0
     python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
@@ -155,6 +161,7 @@ from lejepa_norm.eval import randomization
 from lejepa_norm.eval import retrieval
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
+from lejepa_norm.eval import svhn_control
 from lejepa_norm.eval import sweep
 from lejepa_norm.eval import transfer
 from lejepa_norm.eval import usage_shift
@@ -218,6 +225,15 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         metavar="PREFIX",
         help="Aggregate the --shift-unit outputs of runs PREFIX_* per lambda "
         "(needs --config).",
+    )
+    mode.add_argument(
+        "--svhn-control",
+        metavar="PREFIX",
+        help="Is the SVHN radius signal explained by low-level image statistics? "
+        "For runs PREFIX_* (needs --config): with --svhn-control-stats compute the "
+        "image statistics once, with --svhn-control-run one run's unit, otherwise "
+        "aggregate the units per lambda into --note (see "
+        "`lejepa_norm.eval.svhn_control`).",
     )
     mode.add_argument(
         "--aggregate-controls",
@@ -328,6 +344,16 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: run just the clean-to-corrupted radius transfer.",
     )
     parser.add_argument(
+        "--svhn-control-stats",
+        action="store_true",
+        help="With --svhn-control: compute the per-image low-level statistics.",
+    )
+    parser.add_argument(
+        "--svhn-control-run",
+        metavar="RUN",
+        help="With --svhn-control: compute the unit file of this run.",
+    )
+    parser.add_argument(
         "--shift-unit",
         action="store_true",
         help="Per-run mode only: compute the use-under-shift outcomes of the run.",
@@ -346,6 +372,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--transfer requires --run-name")
     if args.shift is not None and args.config is None:
         parser.error("--shift requires --config")
+    if args.svhn_control is not None and args.config is None:
+        parser.error("--svhn-control requires --config")
     if args.shift_unit and args.run_name is None:
         parser.error("--shift-unit requires --run-name")
     if args.sigreg_power and args.config is None:
@@ -359,6 +387,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         or args.power_unit
         or args.power_list_units
         or args.shift_unit
+        or args.svhn_control_stats
+        or args.svhn_control_run
         or args.retrieval_run
         or args.lowlabel_run
         or args.frozen_run
@@ -1313,6 +1343,22 @@ def _run_shift_unit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_svhn_control(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    if args.svhn_control_stats:
+        print(f"wrote {svhn_control.compute_image_stats(locations, _stderr)}")
+    elif args.svhn_control_run:
+        out = svhn_control.run_unit(cfg, locations, args.svhn_control_run, _stderr)
+        print(f"wrote {out}")
+    else:
+        for out in svhn_control.write_notes(
+            cfg, locations, args.svhn_control, args.note, not args.no_figures
+        ):
+            print(f"wrote {out}")
+    return 0
+
+
 def _run_shift(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
@@ -1689,6 +1735,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_lowlabel(args)
     if args.frozen_linear is not None:
         return _run_frozen_linear(args)
+    if args.svhn_control is not None:
+        return _run_svhn_control(args)
     if args.shift is not None:
         return _run_shift(args)
     if args.shift_unit:
