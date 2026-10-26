@@ -92,6 +92,16 @@ AGGREGATION_CONTRASTS = (
         view_signal.AGG_TOP,
         view_signal.AGG_BOTTOM,
     ),
+    Contrast(
+        "top-radius view - random single view (post hoc)",
+        view_signal.AGG_TOP,
+        view_signal.AGG_FIRST,
+    ),
+    Contrast(
+        "bottom-radius view - random single view (post hoc)",
+        view_signal.AGG_BOTTOM,
+        view_signal.AGG_FIRST,
+    ),
 )
 
 

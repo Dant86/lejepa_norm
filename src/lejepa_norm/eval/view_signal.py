@@ -65,6 +65,10 @@ AGG_RESIDUAL = "residual-weighted"
 AGG_TOP = "top-radius view"
 AGG_BOTTOM = "bottom-radius view"
 AGG_CENTER = "center view only (context)"
+# Added after the first results (post hoc, not in the pre-registration): the views
+# are i.i.d. augmentations, so view 1 is a random view; the reference for "is the
+# top / bottom radius view better / worse than a random single view".
+AGG_FIRST = "random single view (post hoc context)"
 AGGREGATIONS = (
     AGG_MEAN,
     AGG_RADIUS,
@@ -73,6 +77,7 @@ AGGREGATIONS = (
     AGG_TOP,
     AGG_BOTTOM,
     AGG_CENTER,
+    AGG_FIRST,
 )
 
 # Part C models.
@@ -436,6 +441,7 @@ def evaluate_unit(
         schemes = aggregation_weights(r_v, res_v, residual_sd)
         aggregated = {s: aggregate(u_v, w) for s, w in schemes.items()}
         aggregated[AGG_CENTER] = u
+        aggregated[AGG_FIRST] = u_v[:, 0]
         for scheme, direction in aggregated.items():
             query = median_radius * direction
             for reader in READERS:
