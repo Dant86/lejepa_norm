@@ -1,6 +1,12 @@
 # radius_usage / svhn_control: is the radius signal on SVHN just low-level image statistics?
 
-**Status: pre-registration committed before any result of this study was computed. Results, interpretation and the full header (branch / commit, UTC datetime, commands, GPU/CPU info) are added below this section after the runs.**
+- **Branch / version:** radius-usage-svhn-control @ a1e6f73 (analysis code; this note is committed right after)
+- **Run datetime (UTC):** 2026-10-26T01:47:00Z
+- **Command(s):** see the header of `svhn_control_lam0.05.md` (jobs 2247653 stats, 2247794-2247802 per-run units, 2247980 aggregation; CPU only, no GPU).
+- **Datasets:** STL-10 ([canonical](https://cs.stanford.edu/~acoates/stl10/), [HF `tanganke/stl10`](https://huggingface.co/datasets/tanganke/stl10)), DTD `test` ([canonical](https://www.robots.ox.ac.uk/~vgg/data/dtd/), [HF `tanganke/dtd`](https://huggingface.co/datasets/tanganke/dtd)), SVHN `test` ([canonical](http://ufldl.stanford.edu/housenumbers/), [HF `ufldl-stanford/svhn`](https://huggingface.co/datasets/ufldl-stanford/svhn)); canonical sources were used, HF pages are for reference only.
+- **Backbone:** ResNet-18 from scratch ([HF architecture reference](https://huggingface.co/timm/resnet18.a1_in1k), weights not used); `last.pt` of `radius_marginal_lam{0.02,0.05,0.1}_s{0,1,2}`.
+
+**Status: pre-registration (committed in db1123a before any result was computed) followed by the results and interpretation at the end of this file. Generated per-lambda tables: `svhn_control_lam{0.02,0.05,0.1}.md`.**
 
 h is not analyzed; LeJEPA's product is z.
 
@@ -29,3 +35,25 @@ Runs `radius_marginal_lam{0.02,0.05,0.1}_s{0,1,2}` (`last.pt`), center-view z du
 ## Code
 
 `lejepa_norm.eval.image_stats`, `lejepa_norm.eval.svhn_control` (reuses `ood_radius` scores/ROC/bootstrap, `randomization` bootstrap helpers and direction -> radius map), `plotting.bar_plot`, `apps/analyze.py --svhn-control PREFIX [--svhn-control-stats | --svhn-control-run RUN]`. Tests: `tests/test_svhn_control.py`.
+
+## Results (summary; numbers from the generated per-lambda notes, seed means, 95% CIs there)
+
+| lambda | R^2 of log-radius from statistics (GB) | AUROC SVHN: statistics Mahalanobis | AUROC SVHN: radius deviation | (c) direction + residual dev. - direction | (d) radius comb. - statistics comb. | matched AUROC (low radius, matched ref.) | pre-registered reading (SVHN) |
+|---|---|---|---|---|---|---|---|
+| 0.02 | 0.269 | 1.000 | 0.719 | +0.258 (A higher) | -0.332 (B higher) | 0.970 (informative) | partly explained |
+| 0.05 | 0.217 | 1.000 | 0.646 | +0.187 (A higher) | -0.363 (B higher) | 0.874 (informative) | partly explained |
+| 0.1 | 0.209 | 1.000 | 0.620 | +0.184 (A higher) | -0.364 (B higher) | 0.906 (informative) | partly explained |
+
+DTD (not decisive): the radius deviation does not add to the direction score (shift combination - direction is -0.09 to -0.12), statistics Mahalanobis beats the radius deviation by about +0.30 AUROC, and the overall reading is again `partly explained`.
+
+## Interpretation
+
+1. **The low-level statistics explain only a minority of the ID log-radius** (held-out R^2 0.21 to 0.27, lower bound far above 0.05) against 0.95 for the direction; they add 0.001 to 0.002 R^2 beyond the direction. So the radius is mostly a function of the direction, not of these statistics.
+2. **The pre-registered rule gives `partly explained` for SVHN at every lambda** (residual combination still adds, matched AUROC informative, but the radius combination does not match the statistics combination).
+3. **The control itself is degenerate on SVHN and its verdicts should not be read as a clean answer.** SVHN is built at 96x96 by upsampling 32x32 digits (`data/layout.py`), so Laplacian variance, gradient energy, high-frequency fraction and JPEG/PNG sizes separate it from STL-10 almost perfectly (single-statistic AUROC 0.995 to 1.000; the statistics Mahalanobis score has AUROC 1.000). Consequences: (i) (d) is `B higher` because the statistics comparator is saturated at 1.0, and the radius deviation on top of it is `equivalent` only because of that ceiling; (ii) the matched control fails its premise: matching balance on the blur statistic is off by about 3 SD, one STL-10 image takes up to 23,901 SVHN matches, and the matching closes only 11% (lam 0.05; -15% at 0.02) of the log-radius gap, so "matched AUROC informative" is not evidence of independence from the statistics; (iii) the "residual given statistics" scores are evaluated where the statistics model extrapolates far off the bank's support, so their AUROC (0.82 to 0.89) and the 'fraction of gain retained' (2.1 to 4.6, above 1) reflect extrapolation error, not a clean radius signal.
+4. What can be said: SVHN's smaller radius is accompanied by a trivially detectable low-level difference (upsampling blur), so the shift note's SVHN gain **cannot be attributed to semantic novelty**, and this control **cannot rule the low-level explanation out either**. The earlier framing (radius carries OOD signal on SVHN) should carry the caveat that SVHN differs from STL-10 in resolution provenance. DTD, where the statistics do not trivially separate the sets (Mahalanobis AUROC 0.84, below the direction-only kNN 0.90), shows no radius gain to begin with.
+
+## Next steps
+
+- A clean SVHN control needs an OOD set whose low-level statistics overlap STL-10's (e.g. SVHN downsampled to 32x32 and back, blurred STL-10 as the ID reference, or another natural-image OOD set at native resolution) and a re-embedding; not done here. Alternatively, restrict to SVHN images inside the bank's statistics support and re-run (b)-(d).
+- Deviation from pre-registration: none in the computations; the degeneracy was found after the results and is reported as such rather than altering the rule.
