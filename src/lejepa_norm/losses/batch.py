@@ -18,10 +18,13 @@ class ViewBatch:
             image `i` is `z[v, i]`.
         is_global: Bool tensor of shape `(num_views,)`; True for global views,
             False for local views.
+        labels: Optional int labels `(batch_size,)`, only used by the supervised
+            baseline.
     """
 
     z: torch.Tensor
     is_global: torch.Tensor
+    labels: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         """Validates shapes and that a global view exists."""
@@ -33,6 +36,8 @@ class ViewBatch:
             raise ValueError("is_global must be a bool tensor")
         if not bool(self.is_global.any()):
             raise ValueError("at least one global view is required")
+        if self.labels is not None and self.labels.shape != (self.z.shape[1],):
+            raise ValueError("labels must have one entry per image")
 
     @property
     def global_z(self) -> torch.Tensor:
@@ -53,3 +58,9 @@ class Loss(typing.Protocol):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Computes the loss for `batch`."""
         ...
+
+
+def trainable_module(loss: Loss) -> torch.nn.Module | None:
+    """The loss's own learnable module (e.g. the supervised linear head), if any."""
+    module = getattr(loss, "module", None)
+    return module if isinstance(module, torch.nn.Module) else None

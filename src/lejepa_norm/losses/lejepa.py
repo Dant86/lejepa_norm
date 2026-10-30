@@ -10,6 +10,7 @@ import math
 import torch
 
 from lejepa_norm import config
+from lejepa_norm.losses import baselines
 from lejepa_norm.losses import batch as batch_lib
 from lejepa_norm.losses import diagnostics
 from lejepa_norm.losses import invariance
@@ -89,11 +90,13 @@ class LeJEPALoss:
         return total, stats
 
 
-def build_loss(cfg: config.LossConfig) -> batch_lib.Loss:
+def build_loss(cfg: config.LossConfig, embed_dim: int | None = None) -> batch_lib.Loss:
     """Builds the loss selected by `cfg.variant`.
 
     Args:
         cfg: Loss config.
+        embed_dim: Embedding width (`model.embed_dim`); only the supervised
+            baseline's head needs it.
 
     Returns:
         A callable conforming to `lejepa_norm.losses.batch.Loss`.
@@ -103,4 +106,6 @@ def build_loss(cfg: config.LossConfig) -> batch_lib.Loss:
     """
     if cfg.variant == "A":
         return LeJEPALoss(cfg)
+    if cfg.variant in baselines.BASELINES:
+        return baselines.build(cfg, embed_dim)
     raise NotImplementedError(f"loss variant {cfg.variant!r} is not implemented yet")
