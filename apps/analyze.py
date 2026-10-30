@@ -195,8 +195,8 @@ from lejepa_norm.eval import randomization
 from lejepa_norm.eval import retrieval
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
-from lejepa_norm.eval import svhn_control
 from lejepa_norm.eval import sphere_compare
+from lejepa_norm.eval import svhn_control
 from lejepa_norm.eval import sweep
 from lejepa_norm.eval import transfer
 from lejepa_norm.eval import usage_shift
@@ -1522,6 +1522,9 @@ def _run_svhn_control(args: argparse.Namespace) -> int:
             cfg, locations, args.svhn_control, args.note, not args.no_figures, study
         ):
             print(f"wrote {out}")
+    return 0
+
+
 def _run_compare(args: argparse.Namespace) -> int:
     """E3: one radius-free run's units (`--compare-unit`) or the aggregate note."""
     cfg = config.load_config(args.config, args.overrides)
