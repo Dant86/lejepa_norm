@@ -37,7 +37,7 @@ def raw_dir(data_dir: str | os.PathLike[str]) -> pathlib.Path:
 
 
 def download(data_dir: str | os.PathLike[str]) -> None:
-    """Fetches STL-10 (all splits), DTD and SVHN test into `<data_dir>/raw/`.
+    """Fetches STL-10 (all splits), DTD, SVHN and Places365 val into `<data_dir>/raw/`.
 
     Needs network access; run on the login node. Already-downloaded files are
     verified (md5) and not fetched again.
@@ -48,6 +48,7 @@ def download(data_dir: str | os.PathLike[str]) -> None:
         torchvision.datasets.STL10(str(root), split=split, download=True)
     torchvision.datasets.DTD(str(root), split="test", partition=1, download=True)
     torchvision.datasets.SVHN(str(root), split="test", download=True)
+    torchvision.datasets.Places365(str(root), split="val", small=True, download=True)
 
 
 def _save(path: pathlib.Path, array: np.ndarray) -> None:
@@ -121,6 +122,24 @@ def read_dtd_raw(raw: pathlib.Path) -> tuple[np.ndarray, np.ndarray]:
     return images, labels
 
 
+def read_places_raw(raw: pathlib.Path) -> tuple[np.ndarray, np.ndarray]:
+    """Reads Places365 validation (small, 256x256 JPEGs), downsampled to 96x96.
+
+    Only downsamples (256 -> 96), so the images carry no interpolation blur. Reads
+    the torchvision download layout (`places365_val.txt`, `val_256/`) directly.
+    Labels are the 365 scene-category indices.
+    """
+    entries = [
+        line.split() for line in (raw / "places365_val.txt").read_text().splitlines()
+    ]
+    images = np.empty((len(entries), IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
+    for i, (name, _) in enumerate(entries):
+        with PIL.Image.open(raw / "val_256" / name) as img:
+            images[i] = _resize(img)
+    labels = np.array([int(target) for _, target in entries], dtype=np.int64)
+    return images, labels
+
+
 def build_stl10(data_dir: pathlib.Path) -> None:
     """Writes the three STL-10 splits (`unlabeled`, `train`, `test`)."""
     for split in ("unlabeled", "train", "test"):
@@ -145,6 +164,14 @@ def build_svhn(data_dir: pathlib.Path) -> None:
     small, labels = read_svhn_raw(raw_dir(data_dir))
     images = np.stack([_resize(PIL.Image.fromarray(img)) for img in small])  # pyright: ignore[reportUnknownMemberType]
     _save_split(data_dir, "svhn", "test", images, labels)
+
+
+def build_places(data_dir: pathlib.Path) -> None:
+    """Writes Places365 `val`, downsampled from 256x256 to 96x96."""
+    if layout.images_path(data_dir, "places365", "val").exists():
+        return
+    images, labels = read_places_raw(raw_dir(data_dir))
+    _save_split(data_dir, "places365", "val", images, labels)
 
 
 def _corrupt_chunk(
@@ -226,4 +253,5 @@ def build(data_dir: str | os.PathLike[str], cfg: config.DataConfig) -> None:
     build_stl10(root)
     build_dtd(root)
     build_svhn(root)
+    build_places(root)
     build_stl10c(root, cfg)
