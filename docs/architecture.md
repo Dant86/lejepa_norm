@@ -34,6 +34,7 @@ graph LR
     TR --> TRAIN
     EM --> CFG
     EM --> PTH
+    EM --> MOD
     EM --> EVAL
     AN --> CFG
     AN --> PTH
@@ -49,6 +50,8 @@ graph LR
     EVAL --> MOD
     EVAL --> CFG
     EVAL --> LOSS
+    EVAL --> PLOT
+    EVAL --> REP
     DATA --> CFG
     MOD --> CFG
     LOSS --> CFG
@@ -66,6 +69,7 @@ flowchart TD
     TR --> RUN[("Run dir: checkpoints, resolved config, metrics.jsonl")]
     RUN --> EM["apps/embed.py"]
     DATA --> EM
+    EM -. "--random-init: untrained checkpoint (E2 baseline)" .-> RUN
     EM --> EMB[("Embedding dumps: z, h, K views per image")]
     EMB --> AN["apps/analyze.py"]
     RUN --> AN

@@ -13,6 +13,7 @@ Optimizer state is not part of this format.
 import dataclasses
 import os
 import pathlib
+import time
 
 import torch
 from torch import nn
@@ -32,6 +33,10 @@ class Checkpoint:
     epoch: int
 
 
+SAVE_ATTEMPTS = 3
+SAVE_RETRY_SECONDS = 5.0
+
+
 def save(
     path: str | os.PathLike[str],
     backbone: nn.Module,
@@ -47,19 +52,29 @@ def save(
         projector: Trained projector.
         cfg: The resolved config of the run.
         epoch: Number of completed epochs.
+
+    Raises:
+        RuntimeError: the write failed on every one of `SAVE_ATTEMPTS` attempts.
     """
     dest = pathlib.Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
-    torch.save(
-        {
-            "backbone": backbone.state_dict(),
-            "projector": projector.state_dict(),
-            "config": config.to_dict(cfg),
-            "epoch": epoch,
-        },
-        tmp,
-    )
+    payload = {
+        "backbone": backbone.state_dict(),
+        "projector": projector.state_dict(),
+        "config": config.to_dict(cfg),
+        "epoch": epoch,
+    }
+    for attempt in range(SAVE_ATTEMPTS):
+        try:
+            torch.save(payload, tmp)
+            break
+        except (RuntimeError, OSError):
+            # Transient write errors on the shared filesystem (seen once in a run).
+            tmp.unlink(missing_ok=True)
+            if attempt == SAVE_ATTEMPTS - 1:
+                raise
+            time.sleep(SAVE_RETRY_SECONDS * (attempt + 1))
     tmp.replace(dest)
 
 

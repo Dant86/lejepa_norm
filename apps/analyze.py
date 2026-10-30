@@ -76,6 +76,14 @@ lambda into `<note stem>_lam<lambda>.md` next to `--note`, which gets the
 cross-lambda summary
 (see `lejepa_norm.eval.view_signal`, `view_signal_stats`).
 
+With `--confidence-unit` (per-run mode, needs `--config`; no `--note`) one run's
+radius-vs-confidence statistics (error detection by the radius signals, nested
+comparison against the readers' own confidence, STL-10-C and OOD) are computed into
+`<runs_dir>/<run>/confidence_<space>.npz` (`--confidence-space z`, or `h` for the
+E2 baselines only); `--confidence PREFIX` aggregates them per group into
+`<note stem>_<space>_<group>.md` plus a summary section in `--note` (see
+`lejepa_norm.eval.usage_confidence`, `confidence`).
+
 With `--retrieval PREFIX`, Euclidean retrieval of z (class-level on the STL-10 center
 views, instance-level view-to-view on the augmented global views; see
 `lejepa_norm.eval.retrieval`) is evaluated under the radius conditions of the
@@ -93,6 +101,26 @@ unit is computed into a shard under `<runs_dir>/frozen_linear/<--frozen-shards>`
 shards are skipped, so SLURM jobs can be requeued and run in parallel,
 `slurm/frozen_linear.sbatch`); without either the shards are aggregated per
 lambda into `--note`.
+
+With `--baseline-controls PREFIX...` (needs `--config`; z only), the E2 controls of
+the redundancy R^2 (`lejepa_norm.eval.baseline_controls`: redundancy controls with
+bootstrap intervals, random smooth functions of the direction, learning curve in
+N) run per run `PREFIX_*_s<seed>` that has the `stl10_train` and `stl10_test` dumps:
+`--bc-list-runs` prints them, `--bc-run NAME` computes one into a shard under
+`<runs_dir>/baseline_controls/<--bc-shards>` (`--bc-parts` selects parts; finished
+shards are skipped; `slurm/baseline_controls.sbatch` runs one SLURM job per run);
+without either the shards are aggregated per group (run name without `_s<seed>`)
+into three notes next to `--note` (`<stem>_redundancy.md`, `_smooth.md`,
+`_curve.md`), with `--bc-reference` as the group of the contrast table.
+
+With `--compare-prefix PREFIX --baseline-prefix BASELINE` (needs `--config`), the
+runs `PREFIX_*` are compared with the matching runs `BASELINE_*` (same lambda and
+seed index; z only): clean and STL-10-C accuracy of the E1 readers, class and
+instance retrieval and OOD detection, plus training-health curves (see
+`lejepa_norm.eval.sphere_compare`; built for E3, the model trained with
+`loss.radius_free`). `--compare-unit NAME` first computes one radius-free run's
+unit files under `<runs_dir>/NAME` (needs the five embedding dumps; GPU if
+available); without it the units are aggregated into `--note`.
 
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
@@ -128,6 +156,13 @@ Examples:
         --run-name radius_marginal_lam0.05_s0 --shift-unit
     python apps/analyze.py --config configs/base.yaml --shift radius_marginal \
         --note radius_usage/shift.md
+    python apps/analyze.py --config configs/base.yaml --svhn-control radius_marginal \
+        --svhn-control-stats
+    python apps/analyze.py --config configs/base.yaml --svhn-control radius_marginal \
+        --svhn-control-run radius_marginal_lam0.05_s0
+    python apps/analyze.py --config configs/base.yaml --svhn-control radius_marginal \
+        --note radius_usage/svhn_control.md
+    # the same with Places365 as the OOD set (add --control-study places to each)
     python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
         --retrieval-run radius_marginal_lam0.05_s0
     python apps/analyze.py --config configs/base.yaml --retrieval radius_marginal \
@@ -136,6 +171,18 @@ Examples:
         --frozen-linear radius_marginal --frozen-run radius_marginal_lam0.05_s0
     python apps/analyze.py --config configs/base.yaml \
         --frozen-linear radius_marginal --note radius_usage/frozen_linear_summary.md
+    python apps/analyze.py --config configs/base.yaml \
+        --baseline-controls radius_marginal random_init \
+        --bc-run radius_marginal_lam0.05_s0
+    python apps/analyze.py --config configs/base.yaml \
+        --baseline-controls radius_marginal random_init \
+        --note radius_baselines/controls.md
+    python apps/analyze.py --config configs/base.yaml \
+        --compare-prefix sigreg_sphere --baseline-prefix radius_marginal \
+        --compare-unit sigreg_sphere_lam0.05_s0
+    python apps/analyze.py --config configs/base.yaml \
+        --compare-prefix sigreg_sphere --baseline-prefix radius_marginal \
+        --note sigreg_sphere/sphere_vs_radius.md
 """
 
 import argparse
@@ -155,6 +202,7 @@ from lejepa_norm import paths
 from lejepa_norm import plotting
 from lejepa_norm import reporting
 from lejepa_norm.eval import analysis
+from lejepa_norm.eval import baseline_controls
 from lejepa_norm.eval import controls
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import dynamics
@@ -164,8 +212,11 @@ from lejepa_norm.eval import randomization
 from lejepa_norm.eval import retrieval
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
+from lejepa_norm.eval import sphere_compare
+from lejepa_norm.eval import svhn_control
 from lejepa_norm.eval import sweep
 from lejepa_norm.eval import transfer
+from lejepa_norm.eval import usage_confidence
 from lejepa_norm.eval import usage_shift
 from lejepa_norm.eval import usage_view_signal
 
@@ -203,6 +254,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         metavar="PREFIX",
         help="k-NN with randomized radius for runs PREFIX_* (needs --config).",
     )
+    parser.add_argument(
+        "--space",
+        choices=("z", "h"),
+        default="z",
+        help="--randomize-radius only: embedding to randomize (default z; h is an "
+        "explicit exception for the E2 baselines).",
+    )
     mode.add_argument(
         "--retrieval",
         metavar="PREFIX",
@@ -220,6 +278,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "`<note stem>_lam<lambda>.md` plus a summary in --note.",
     )
     mode.add_argument(
+        "--compare-prefix",
+        metavar="PREFIX",
+        help="Compare runs PREFIX_* with --baseline-prefix runs (E3, needs "
+        "--config); --compare-unit computes one run's units, otherwise aggregate "
+        "into --note.",
+    )
+    mode.add_argument(
         "--lowlabel",
         metavar="PREFIX",
         help="E1 readers with a small labeled bank for runs PREFIX_* (needs "
@@ -233,10 +298,34 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "(needs --config).",
     )
     mode.add_argument(
+        "--baseline-controls",
+        nargs="+",
+        metavar="PREFIX",
+        help="E2 controls of the redundancy R^2 for runs PREFIX_*_s<seed> (needs "
+        "--config): with --bc-run compute one run's shard, with --bc-list-runs "
+        "list the runs, otherwise aggregate the shards into --note.",
+    )
+    mode.add_argument(
         "--shift",
         metavar="PREFIX",
         help="Aggregate the --shift-unit outputs of runs PREFIX_* per lambda "
         "(needs --config).",
+    )
+    mode.add_argument(
+        "--confidence",
+        metavar="PREFIX",
+        help="Aggregate the --confidence-unit outputs of runs PREFIX_* per group "
+        "(lambda for LeJEPA, loss for the E2 baselines) into notes next to --note "
+        "(see --confidence-space).",
+    )
+    mode.add_argument(
+        "--svhn-control",
+        metavar="PREFIX",
+        help="Is the SVHN radius signal explained by low-level image statistics? "
+        "For runs PREFIX_* (needs --config): with --svhn-control-stats compute the "
+        "image statistics once, with --svhn-control-run one run's unit, otherwise "
+        "aggregate the units per lambda into --note (see "
+        "`lejepa_norm.eval.svhn_control`).",
     )
     mode.add_argument(
         "--aggregate-controls",
@@ -274,6 +363,16 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Synthetic SIGReg power study (needs --config).",
     )
     parser.add_argument(
+        "--baseline-prefix",
+        help="With --compare-prefix: prefix of the runs compared against.",
+    )
+    parser.add_argument(
+        "--compare-unit",
+        metavar="RUN",
+        help="With --compare-prefix: compute this radius-free run's unit files "
+        "instead of aggregating.",
+    )
+    parser.add_argument(
         "--retrieval-run",
         help="With --retrieval: compute only this run's per-query shard "
         "(<runs_dir>/radius_usage_retrieval/<run>.npz; GPU if available).",
@@ -293,6 +392,33 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         default="default",
         help="With --frozen-linear: shard directory name under "
         "<runs_dir>/frozen_linear.",
+    )
+    parser.add_argument(
+        "--bc-run", help="With --baseline-controls: compute only this run's shard."
+    )
+    parser.add_argument(
+        "--bc-list-runs",
+        action="store_true",
+        help="With --baseline-controls: print the runs with both dumps and exit.",
+    )
+    parser.add_argument(
+        "--bc-parts",
+        default=",".join(baseline_controls.PARTS),
+        help="With --bc-run: comma-separated subset of "
+        + ", ".join(baseline_controls.PARTS)
+        + ".",
+    )
+    parser.add_argument(
+        "--bc-shards",
+        default="default",
+        help="With --baseline-controls: shard directory name under "
+        "<runs_dir>/baseline_controls.",
+    )
+    parser.add_argument(
+        "--bc-reference",
+        default="random_init_bncal",
+        help="With --baseline-controls (aggregation): group the contrast table "
+        "subtracts.",
     )
     parser.add_argument(
         "--power-unit",
@@ -347,6 +473,23 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: run just the clean-to-corrupted radius transfer.",
     )
     parser.add_argument(
+        "--control-study",
+        choices=sorted(svhn_control.STUDIES),
+        default="svhn",
+        help="With --svhn-control: the decisive OOD set, `svhn` (default) or "
+        "`places` (Places365, see `research_notes/radius_usage/places_control.md`).",
+    )
+    parser.add_argument(
+        "--svhn-control-stats",
+        action="store_true",
+        help="With --svhn-control: compute the per-image low-level statistics.",
+    )
+    parser.add_argument(
+        "--svhn-control-run",
+        metavar="RUN",
+        help="With --svhn-control: compute the unit file of this run.",
+    )
+    parser.add_argument(
         "--shift-unit",
         action="store_true",
         help="Per-run mode only: compute the use-under-shift outcomes of the run.",
@@ -354,6 +497,26 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--view-signal-run",
         help="With --view-signal: compute only this run's unit file.",
+    )
+    parser.add_argument(
+        "--confidence-unit",
+        action="store_true",
+        help="Per-run mode only: compute the radius-confidence statistics of the "
+        "run into <runs_dir>/<run>/confidence_<space>.npz.",
+    )
+    parser.add_argument(
+        "--confidence-part",
+        choices=usage_confidence.PARTS,
+        default="all",
+        help="With --confidence-unit: `ood` recomputes only the OOD groups of an "
+        "existing unit (e.g. when a new OOD dump becomes available).",
+    )
+    parser.add_argument(
+        "--confidence-space",
+        choices=usage_confidence.SPACES,
+        default="z",
+        help="With --confidence / --confidence-unit: z (default) or h. h only for "
+        "the E2 baselines (their projector is discarded after training).",
     )
     parser.add_argument(
         "--shift-part",
@@ -369,14 +532,22 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--transfer requires --run-name")
     if args.shift is not None and args.config is None:
         parser.error("--shift requires --config")
+    if args.svhn_control is not None and args.config is None:
+        parser.error("--svhn-control requires --config")
     if args.shift_unit and args.run_name is None:
         parser.error("--shift-unit requires --run-name")
     if args.view_signal is not None and args.config is None:
         parser.error("--view-signal requires --config")
+    if args.confidence_unit and (args.run_name is None or args.config is None):
+        parser.error("--confidence-unit requires --run-name and --config")
     if args.sigreg_power and args.config is None:
         parser.error("--sigreg-power requires --config")
     if args.retrieval is not None and args.config is None:
         parser.error("--retrieval requires --config")
+    if args.compare_prefix is not None and (
+        args.config is None or args.baseline_prefix is None
+    ):
+        parser.error("--compare-prefix requires --config and --baseline-prefix")
     if args.lowlabel is not None and args.config is None:
         parser.error("--lowlabel requires --config")
     if args.note is None and not (
@@ -385,16 +556,24 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         or args.power_list_units
         or args.shift_unit
         or args.view_signal_run
+        or args.confidence_unit
+        or args.svhn_control_stats
+        or args.svhn_control_run
         or args.retrieval_run
+        or args.compare_unit
         or args.lowlabel_run
         or args.frozen_run
         or args.frozen_list_runs
+        or args.bc_run
+        or args.bc_list_runs
     ):
         parser.error("--note is required")
     if args.randomize_radius is not None and args.config is None:
         parser.error("--randomize-radius requires --config")
     if args.frozen_linear is not None and args.config is None:
         parser.error("--frozen-linear requires --config")
+    if args.baseline_controls is not None and args.config is None:
+        parser.error("--baseline-controls requires --config")
     if args.redundancy_controls and args.run_name is None:
         parser.error("--redundancy-controls requires --run-name")
     return args
@@ -731,7 +910,9 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
             skipped.append({"run": run.name, "missing dump": ", ".join(missing)})
             print(f"skipping {run.name}: no {', '.join(missing)} dump", file=sys.stderr)
             continue
-        evaluation = randomization.evaluate_shards(bank, query, cfg.eval, cfg.seed)
+        evaluation = randomization.evaluate_shards(
+            bank, query, cfg.eval, cfg.seed, args.space
+        )
         results.append(randomization.RunResult(run.name, run.lam, run.seed, evaluation))
         diagnostics += [
             {
@@ -757,8 +938,8 @@ def _run_randomize_radius(args: argparse.Namespace) -> int:
         note,
         "analyze.randomization_comparison",
         "### Paired accuracy change vs the baseline, per lambda\n\n"
-        f"z-space, center views; bank = STL-10 train, test set = STL-10 test; the "
-        "same transformation is applied to bank and test set independently. "
+        f"{args.space}-space, center views; bank = STL-10 train, test set = STL-10 "
+        "test; the same transformation is applied to bank and test set independently. "
         "Differences are in accuracy points (condition minus baseline on the same "
         "test images), averaged over training seeds; intervals are paired "
         f"bootstrap percentile intervals ({cfg.eval.num_bootstrap} replicates, test "
@@ -1161,6 +1342,57 @@ def _run_frozen_linear(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_baseline_controls(args: argparse.Namespace) -> int:
+    """E2 controls: list runs, compute one run's shard, or aggregate the shards."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stderr
+    )
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    shard_dir = locations.runs_dir / "baseline_controls" / args.bc_shards
+    runs = baseline_controls.list_runs(locations.embed_dir, args.baseline_controls)
+    if args.bc_list_runs:
+        print("\n".join(runs), flush=True)
+        return 0
+    if args.bc_run is not None:
+        if args.bc_run not in runs:
+            raise FileNotFoundError(f"run {args.bc_run} lacks a dump or the prefix")
+        shard = shard_dir / f"{args.bc_run}.npz"
+        if shard.exists():
+            logger.info("%s: shard exists, skipping", args.bc_run)
+            return 0
+        bank = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, args.bc_run, dumps.STL10_TRAIN)
+        )
+        test = dumps.load_set(
+            dumps.set_dir(locations.embed_dir, args.bc_run, dumps.STL10_TEST)
+        )
+        assert bank is not None and test is not None
+        parts = [p.strip() for p in args.bc_parts.split(",") if p.strip()]
+        result = baseline_controls.run_unit(
+            args.bc_run, bank, test, cfg.eval, cfg.seed, parts
+        )
+        baseline_controls.save_run(shard, result)
+        logger.info("%s: wrote %s", args.bc_run, shard)
+        return 0
+    missing = [r for r in runs if not (shard_dir / f"{r}.npz").exists()]
+    if missing or not runs:
+        raise FileNotFoundError(f"missing shards in {shard_dir}: {', '.join(missing)}")
+    results = [baseline_controls.load_run(shard_dir / f"{r}.npz") for r in runs]
+    written = baseline_controls.write_notes(
+        results,
+        cfg.eval,
+        locations.notes_dir / args.note,
+        args.bc_reference,
+        cfg.seed,
+        locations.kaleido_chrome,
+        figures=not args.no_figures,
+    )
+    for note in written:
+        print(f"wrote {note}")
+    return 0
+
+
 RETRIEVAL_SHARDS = "radius_usage_retrieval"
 
 
@@ -1357,11 +1589,81 @@ def _run_view_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_svhn_control(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    study = svhn_control.STUDIES[args.control_study]
+    if args.svhn_control_stats:
+        print(f"wrote {svhn_control.compute_image_stats(locations, _stderr, study)}")
+    elif args.svhn_control_run:
+        out = svhn_control.run_unit(
+            cfg, locations, args.svhn_control_run, _stderr, study
+        )
+        print(f"wrote {out}")
+    else:
+        for out in svhn_control.write_notes(
+            cfg, locations, args.svhn_control, args.note, not args.no_figures, study
+        ):
+            print(f"wrote {out}")
+    return 0
+
+
+def _run_compare(args: argparse.Namespace) -> int:
+    """E3: one radius-free run's units (`--compare-unit`) or the aggregate note."""
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    if args.compare_unit is not None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        for out in sphere_compare.run_unit(
+            cfg, locations, args.compare_unit, _stderr, device
+        ):
+            print(f"wrote {out}")
+        return 0
+    out = sphere_compare.write_note(
+        cfg,
+        locations,
+        args.compare_prefix,
+        args.baseline_prefix,
+        args.note,
+        not args.no_figures,
+    )
+    print(f"wrote {out}")
+    return 0
+
+
 def _run_shift(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
     for out in usage_shift.write_notes(
         cfg, locations, args.shift, args.note, not args.no_figures
+    ):
+        print(f"wrote {out}")
+    return 0
+
+
+def _run_confidence_unit(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    out = usage_confidence.run_unit(
+        cfg,
+        locations,
+        args.run_name,
+        args.confidence_space,
+        _stderr,
+        args.confidence_part,
+    )
+    print(f"wrote {out}")
+    return 0
+
+
+def _run_confidence(args: argparse.Namespace) -> int:
+    locations = paths.load_paths()
+    for out in usage_confidence.write_notes(
+        locations,
+        args.confidence,
+        args.confidence_space,
+        args.note,
+        not args.no_figures,
     ):
         print(f"wrote {out}")
     return 0
@@ -1735,10 +2037,20 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_frozen_linear(args)
     if args.view_signal is not None:
         return _run_view_signal(args)
+    if args.svhn_control is not None:
+        return _run_svhn_control(args)
+    if args.baseline_controls is not None:
+        return _run_baseline_controls(args)
+    if args.compare_prefix is not None:
+        return _run_compare(args)
     if args.shift is not None:
         return _run_shift(args)
     if args.shift_unit:
         return _run_shift_unit(args)
+    if args.confidence is not None:
+        return _run_confidence(args)
+    if args.confidence_unit:
+        return _run_confidence_unit(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
     if args.epoch_unit is not None:

@@ -79,15 +79,21 @@ class CenterShard:
     severity: numpy.typing.NDArray[numpy.int8]
 
 
-def load_center_shard(path: str | os.PathLike[str]) -> CenterShard:
-    """Reads only the center-view `z` and the metadata of a shard.
+def load_center_shard(path: str | os.PathLike[str], space: str = "z") -> CenterShard:
+    """Reads only the center-view embedding and the metadata of a shard.
 
-    `.npz` members are read lazily, so the backbone feature `h` (about two thirds
-    of the file) is never loaded and only the center slice of `z` is kept.
+    `.npz` members are read lazily, so only the requested array is loaded and only
+    its center slice is kept. `space` is `"z"` (default) or `"h"`; the chosen array
+    is returned in the `z` field (only the E2 baselines are ever read as `"h"`).
+
+    Raises:
+        ValueError: `space` is neither `"z"` nor `"h"`.
     """
+    if space not in ("z", "h"):
+        raise ValueError(f"space must be 'z' or 'h', got {space!r}")
     with numpy.load(path, allow_pickle=False) as arrays:
         return CenterShard(
-            z=numpy.ascontiguousarray(arrays["z"][:, CENTER_VIEW]),
+            z=numpy.ascontiguousarray(arrays[space][:, CENTER_VIEW]),
             image_id=arrays["image_id"],
             label=arrays["label"],
             corruption=arrays["corruption"],

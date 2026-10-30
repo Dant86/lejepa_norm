@@ -57,6 +57,8 @@ class ResumeState:
         rng_augment: State of the augmentation generator
             (`torch.Generator.get_state()` of the training device's generator);
             None in files written before device-side augmentation.
+        loss_module: State dict of the loss's own learnable module (the supervised
+            baseline's linear head); None for losses without one.
     """
 
     config: dict[str, typing.Any]
@@ -72,6 +74,7 @@ class ResumeState:
     rng_cpu: torch.Tensor | None = None
     rng_cuda: list[torch.Tensor] = dataclasses.field(default_factory=list[torch.Tensor])
     rng_augment: torch.Tensor | None = None
+    loss_module: dict[str, torch.Tensor] | None = None
 
 
 def save(path: str | os.PathLike[str], state: ResumeState) -> None:

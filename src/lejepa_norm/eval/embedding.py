@@ -76,6 +76,7 @@ def _sources(
         dumps.STL10_TEST: ("stl10", "test"),
         dumps.DTD_TEST: ("dtd", "test"),
         dumps.SVHN_TEST: ("svhn", "test"),
+        dumps.PLACES_TEST: ("places365", "val"),
     }
     if eval_set in splits:
         dataset, name = splits[eval_set]

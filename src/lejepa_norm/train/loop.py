@@ -1,4 +1,4 @@
-"""Single-device pretraining loop (Variant A; variant-agnostic via `ViewBatch`).
+"""Single-device pretraining loop (variant-agnostic via `ViewBatch`).
 
 Data: the STL-10 `unlabeled` + `train` uint8 arrays stay in RAM; each step's
 images are gathered on the CPU by a background thread (`data.batches`), copied
@@ -325,7 +325,12 @@ def train(
     tc = cfg.train
     autocast = tc.precision == "bf16"
 
-    images = datasets.load_pretraining_images(data_dir)
+    labels: numpy.ndarray | None = None
+    if cfg.loss.variant == "supervised":  # the 5000 labeled images only
+        images, labels = datasets.load_labeled_train(data_dir)
+    else:
+        images = datasets.load_pretraining_images(data_dir)
+    labels_device = None if labels is None else _to_device(labels, device)
     augment = gpu_views.MultiViewAugment(cfg.data)
     aug_generator = augmentation_generator(cfg.seed, device)
     steps_per_epoch = len(images) // tc.batch_size
@@ -341,10 +346,13 @@ def train(
     projector = projector_lib.build_projector(feat_dim, cfg.model)
     backbone.to(device).train()
     projector.to(device).train()
-    optimizer = torch.optim.AdamW(
-        _param_groups([backbone, projector], tc.weight_decay), lr=peak_lr
-    )
-    loss_fn = lejepa.build_loss(cfg.loss)
+    loss_fn = lejepa.build_loss(cfg.loss, cfg.model.embed_dim)
+    loss_module = batch_lib.trainable_module(loss_fn)
+    trained: list[nn.Module] = [backbone, projector]
+    if loss_module is not None:
+        loss_module.to(device).train()
+        trained.append(loss_module)
+    optimizer = torch.optim.AdamW(_param_groups(trained, tc.weight_decay), lr=peak_lr)
     knn = online_knn.OnlineKnn(data_dir, cfg, device)
     num_global = cfg.data.num_global_views
     num_views = num_global + cfg.data.num_local_views
@@ -361,6 +369,9 @@ def train(
         assert resume.optimizer is not None
         backbone.load_state_dict(resume.backbone)
         projector.load_state_dict(resume.projector)
+        if loss_module is not None:
+            assert resume.loss_module is not None
+            loss_module.load_state_dict(resume.loss_module)
         optimizer.load_state_dict(resume.optimizer)
         step, epoch = resume.global_step, resume.epoch
         start_epoch, skip = resume.epoch + 1, resume.step_in_epoch
@@ -389,6 +400,7 @@ def train(
             backbone=backbone.state_dict(),
             projector=projector.state_dict(),
             optimizer=optimizer.state_dict(),
+            loss_module=None if loss_module is None else loss_module.state_dict(),
             epoch_sum=None if epoch_sum is None else epoch_sum.cpu(),
             epoch_elapsed_s=elapsed,
             rng_cpu=torch.get_rng_state(),
@@ -430,7 +442,13 @@ def train(
                     device.type, dtype=torch.bfloat16, enabled=autocast
                 ):
                     h, z = forward_views(backbone, projector, view_list, num_global)
-                loss, loss_stats = loss_fn(batch_lib.ViewBatch(z.float(), is_global))
+                step_labels = None
+                if labels_device is not None:
+                    rows = order[epoch_step * tc.batch_size :][: tc.batch_size]
+                    step_labels = labels_device[_to_device(rows, device)]
+                loss, loss_stats = loss_fn(
+                    batch_lib.ViewBatch(z.float(), is_global, step_labels)
+                )
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()  # pyright: ignore[reportUnknownMemberType]
                 optimizer.step()  # pyright: ignore[reportUnknownMemberType]
@@ -492,6 +510,10 @@ def train(
     )
     resume_lib.save(resume_path, done)
     return TrainResult(run_path, last, step, epoch)
+
+
+def _to_device(array: numpy.ndarray, device: torch.device) -> torch.Tensor:
+    return torch.from_numpy(array).to(device)  # pyright: ignore[reportUnknownMemberType]
 
 
 def _cuda_rng_states() -> list[torch.Tensor]:
