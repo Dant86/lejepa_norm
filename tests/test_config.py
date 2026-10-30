@@ -50,3 +50,15 @@ def test_overrides_round_trip_through_resolved_config(tmp_path: pathlib.Path) ->
 def test_bad_overrides_are_rejected(override: str, error: type[Exception]) -> None:
     with pytest.raises(error):
         config.load_config(BASE, [override])
+
+
+def test_radius_free_flag_round_trips_and_defaults_off(tmp_path: pathlib.Path) -> None:
+    assert config.load_config(BASE).loss.radius_free is False
+    cfg = config.load_config(BASE, ["loss.radius_free=true"])
+    assert cfg.loss.radius_free is True
+    resolved = config.save_resolved(cfg, tmp_path / "run")
+    assert config.load_config(resolved).loss.radius_free is True
+    # A resolved config written before the flag existed still loads (default off).
+    raw = config.to_dict(cfg)
+    del raw["loss"]["radius_free"]
+    assert config.from_dict(raw).loss.radius_free is False

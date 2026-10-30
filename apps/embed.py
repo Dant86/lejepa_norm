@@ -8,9 +8,18 @@ For each evaluation set, every image is embedded un-augmented (view 0) and under
 Existing shards are an error unless `--overwrite` (replace them) or `--resume`
 (keep them and write only the missing ones, e.g. after preemption) is given.
 
+With `--random-init SEED` (instead of `--checkpoint`) the embedded model is an
+untrained network of the config's architecture (E2 baseline): it is written once
+through the checkpoint contract to `LEJEPA_NORM_RUNS_DIR/<run-name>/last.pt`
+(reused if present, so a resumed job embeds the same weights) and then embedded
+like any checkpoint. `--bn-mode` chooses its BatchNorm statistics
+(`lejepa_norm.models.random_init`).
+
 Example:
     python apps/embed.py --checkpoint runs/a_l0.05_s0/last.pt \
         --run-name a_l0.05_s0 --set eval.num_views=8
+    python apps/embed.py --random-init 0 --run-name random_init_bncal_s0 \
+        --sets stl10_train,stl10_test
 """
 
 import argparse
@@ -22,6 +31,7 @@ from lejepa_norm import config
 from lejepa_norm import paths
 from lejepa_norm.eval import dumps
 from lejepa_norm.eval import embedding
+from lejepa_norm.models import random_init
 
 
 def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
@@ -33,7 +43,21 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--set", action="append", default=[], dest="overrides")
     parser.add_argument("--env-file", type=pathlib.Path, default=None)
-    parser.add_argument("--checkpoint", required=True, type=pathlib.Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--checkpoint", type=pathlib.Path)
+    source.add_argument(
+        "--random-init",
+        type=int,
+        metavar="SEED",
+        help="Embed an untrained network (initialization seed SEED) instead.",
+    )
+    parser.add_argument(
+        "--bn-mode",
+        choices=random_init.BN_MODES,
+        default=random_init.BN_CALIBRATED,
+        help="With --random-init: BatchNorm running statistics, calibrated by a "
+        "gradient-free pass over unlabeled images or left at the identity.",
+    )
     parser.add_argument("--run-name", required=True)
     parser.add_argument(
         "--sets",
@@ -66,8 +90,19 @@ def main(argv: collections.abc.Sequence[str]) -> int:
     args = _parse(argv)
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths(args.env_file)
+    ckpt_path: pathlib.Path = args.checkpoint
+    if args.random_init is not None:
+        ckpt_path = locations.runs_dir / args.run_name / "last.pt"
+        if not ckpt_path.exists():
+            random_init.write_checkpoint(
+                ckpt_path,
+                cfg,
+                args.random_init,
+                args.bn_mode,
+                data_dir=locations.data_dir,
+            )
     counts = embedding.embed_run(
-        args.checkpoint,
+        ckpt_path,
         cfg,
         locations.data_dir,
         locations.embed_dir,

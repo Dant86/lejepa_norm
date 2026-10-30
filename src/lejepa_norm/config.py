@@ -69,13 +69,28 @@ class ModelConfig:
 
 @dataclasses.dataclass
 class LossConfig:
-    """Loss settings; `variant` selects A (LeJEPA), B (SPHERE-JEPA) or C (Polar)."""
+    """Loss settings; `variant` selects A (LeJEPA), B (SPHERE-JEPA) or C (Polar).
 
-    variant: typing.Literal["A", "B", "C"] = "A"
+    `simclr`, `vicreg` and `supervised` are the E2 baselines
+    (`lejepa_norm.losses.baselines`); only the fields below that variant are used.
+    """
+
+    variant: typing.Literal["A", "B", "C", "simclr", "vicreg", "supervised"] = "A"
     lambda_: float = 0.05
     num_slices: int = 1024
     num_points: int = 17
     t_max: float = 3.0
+    # SimCLR (NT-Xent) temperature.
+    temperature: float = 0.2
+    # VICReg coefficients of the invariance, variance and covariance terms.
+    sim_coeff: float = 25.0
+    std_coeff: float = 25.0
+    cov_coeff: float = 1.0
+    # Supervised baseline: classes of the linear head on z.
+    num_classes: int = 10
+    # E3 (`sigreg-sphere`): replace z by sqrt(d) * z / ||z|| before BOTH the
+    # invariance loss and SIGReg, so the embedding radius is exactly constant.
+    radius_free: bool = False
 
 
 @dataclasses.dataclass
@@ -122,6 +137,13 @@ class EvalConfig:
     retrieval_margin: float = 0.005
     # Random labeled subsets per budget in the low-label study (`analyze --lowlabel`).
     lowlabel_subsets: int = 10
+    # E2 controls (`analyze --baseline-controls`): random smooth functions drawn per
+    # family, size of the fixed held-out set of the learning curve, and the
+    # saturation margin of the curve in R^2 units (R^2 at the largest N versus at
+    # 4000; fixed before any curve was computed).
+    smooth_draws: int = 50
+    curve_holdout: int = 2000
+    curve_margin: float = 0.01
 
 
 @dataclasses.dataclass

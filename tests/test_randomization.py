@@ -321,3 +321,31 @@ def test_analyze_randomize_radius_mode_writes_tables_and_lists_skipped_runs(
     assert "| toy_lam0.1_s0 | stl10_train |" in text
     assert app.main(argv) == 0
     assert (notes / "idea" / "knn.md").read_text() == text  # idempotent
+
+
+def test_evaluate_shards_space_selects_the_embedding() -> None:
+    labels = numpy.random.default_rng(1).integers(0, CLASSES, 150)
+    cfg = config.EvalConfig(knn_k=5, num_randomizations=1)
+    noise = numpy.random.default_rng(2).normal(size=(150, 5, D)).astype(numpy.float32)
+
+    def informative_h(offset: int) -> shards.EmbeddingShard:
+        shard = _shard(labels, offset)  # z == h, both class-clustered
+        return shards.EmbeddingShard(
+            z=noise,
+            h=shard.h,
+            image_id=shard.image_id,
+            label=shard.label,
+            corruption=shard.corruption,
+            severity=shard.severity,
+        )
+
+    bank, query = informative_h(0), informative_h(100)
+    acc = {}
+    for space in ("z", "h"):
+        ev = randomization.evaluate_shards(bank, query, cfg, 0, space)
+        acc[space] = _acc(
+            ev, randomization.LINEAR, randomization.RETRAIN, randomization.BASELINE
+        )
+    assert acc["h"] > acc["z"] + 0.3
+    with pytest.raises(ValueError):
+        randomization.evaluate_shards(bank, query, cfg, 0, "u")

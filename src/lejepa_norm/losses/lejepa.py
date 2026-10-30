@@ -5,13 +5,35 @@ per-view batch size) and averaged over views, as in the paper and the official
 implementation; the views are not pooled into one sample.
 """
 
+import math
+
 import torch
 
 from lejepa_norm import config
+from lejepa_norm.losses import baselines
 from lejepa_norm.losses import batch as batch_lib
 from lejepa_norm.losses import diagnostics
 from lejepa_norm.losses import invariance
 from lejepa_norm.losses import sigreg
+
+
+def project_to_sphere(views: batch_lib.ViewBatch) -> batch_lib.ViewBatch:
+    """Replaces z by `z~ = sqrt(d) * z / ||z||` (every embedding has norm sqrt(d)).
+
+    The radius of the raw projector output then receives no gradient from either
+    loss term. Computed in fp32. Caveat: SIGReg targets N(0, I), whose 1-D
+    projections are Gaussian; those of `z~` are only approximately Gaussian (the
+    mismatch is O(1/d), small at d = 256).
+
+    Args:
+        views: Embeddings of all views of a batch.
+
+    Returns:
+        A batch with the same views, each scaled to norm sqrt(d).
+    """
+    z = views.z.float()
+    z = math.sqrt(z.shape[-1]) * torch.nn.functional.normalize(z, dim=-1)
+    return batch_lib.ViewBatch(z=z, is_global=views.is_global)
 
 
 class LeJEPALoss:
@@ -32,6 +54,7 @@ class LeJEPALoss:
         if not 0.0 <= cfg.lambda_ <= 1.0:
             raise ValueError(f"lambda must be in [0, 1], got {cfg.lambda_}")
         self.lambda_ = cfg.lambda_
+        self.radius_free = cfg.radius_free
         self.sigreg = sigreg.SIGReg(
             num_slices=cfg.num_slices,
             num_points=cfg.num_points,
@@ -49,8 +72,11 @@ class LeJEPALoss:
 
         Returns:
             The fp32 scalar loss and detached diagnostics: `inv`, `dist` (SIGReg),
-            `total` and `kappa` (on all views concatenated; `dist` is per view).
+            `total` and `kappa` (on all views concatenated; `dist` is per view). With
+            `radius_free` all of them see the normalized `z~` (`kappa` is ~0).
         """
+        if self.radius_free:
+            batch = project_to_sphere(batch)
         flat = batch.z.reshape(-1, batch.z.shape[-1])
         inv = invariance.invariance_loss(batch)
         dist = self.sigreg(batch.z)
@@ -64,11 +90,13 @@ class LeJEPALoss:
         return total, stats
 
 
-def build_loss(cfg: config.LossConfig) -> batch_lib.Loss:
+def build_loss(cfg: config.LossConfig, embed_dim: int | None = None) -> batch_lib.Loss:
     """Builds the loss selected by `cfg.variant`.
 
     Args:
         cfg: Loss config.
+        embed_dim: Embedding width (`model.embed_dim`); only the supervised
+            baseline's head needs it.
 
     Returns:
         A callable conforming to `lejepa_norm.losses.batch.Loss`.
@@ -78,4 +106,6 @@ def build_loss(cfg: config.LossConfig) -> batch_lib.Loss:
     """
     if cfg.variant == "A":
         return LeJEPALoss(cfg)
+    if cfg.variant in baselines.BASELINES:
+        return baselines.build(cfg, embed_dim)
     raise NotImplementedError(f"loss variant {cfg.variant!r} is not implemented yet")
