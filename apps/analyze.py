@@ -76,6 +76,12 @@ lambda into `<note stem>_lam<lambda>.md` next to `--note`, which gets the
 cross-lambda summary
 (see `lejepa_norm.eval.view_signal`, `view_signal_stats`).
 
+With `--view-direction PREFIX` (needs `--config`), the view-direction study
+(`lejepa_norm.eval.view_direction`, `usage_view_direction`) on the `augreg_<run>`
+dumps: `--view-direction-run RUN` computes one run's unit file
+(`<runs_dir>/augreg_<run>/view_direction.json`), otherwise the units of the runs
+`PREFIX_*` are written as generated sections of `--note`.
+
 With `--aug-regression PREFIX` (needs `--config`), the augmentation-parameter
 regression of the view radius is run on the re-embedded `stl10_test` dumps
 (`augreg_<run>`, which hold the parameters of every view): with
@@ -227,6 +233,7 @@ from lejepa_norm.eval import transfer
 from lejepa_norm.eval import usage_aug_regression
 from lejepa_norm.eval import usage_confidence
 from lejepa_norm.eval import usage_shift
+from lejepa_norm.eval import usage_view_direction
 from lejepa_norm.eval import usage_view_signal
 
 logger = logging.getLogger(__name__)
@@ -292,6 +299,14 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Regression of the view radius on its augmentation parameters "
         "(`lejepa_norm.eval.aug_regression`; needs --config): with "
         "--aug-regression-run compute one run's unit, otherwise write the sections "
+        "of --note from the units of runs PREFIX_*.",
+    )
+    mode.add_argument(
+        "--view-direction",
+        metavar="PREFIX",
+        help="Is the within-image radius view direction or crop content? "
+        "(`lejepa_norm.eval.view_direction`; needs --config): with "
+        "--view-direction-run compute one run's unit, otherwise write the sections "
         "of --note from the units of runs PREFIX_*.",
     )
     mode.add_argument(
@@ -512,6 +527,10 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: compute the use-under-shift outcomes of the run.",
     )
     parser.add_argument(
+        "--view-direction-run",
+        help="With --view-direction: compute only this run's unit file.",
+    )
+    parser.add_argument(
         "--aug-regression-run",
         help="With --aug-regression: compute only this run's unit file.",
     )
@@ -561,6 +580,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--view-signal requires --config")
     if args.aug_regression is not None and args.config is None:
         parser.error("--aug-regression requires --config")
+    if args.view_direction is not None and args.config is None:
+        parser.error("--view-direction requires --config")
     if args.confidence_unit and (args.run_name is None or args.config is None):
         parser.error("--confidence-unit requires --run-name and --config")
     if args.sigreg_power and args.config is None:
@@ -580,6 +601,7 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         or args.shift_unit
         or args.view_signal_run
         or args.aug_regression_run
+        or args.view_direction_run
         or args.confidence_unit
         or args.svhn_control_stats
         or args.svhn_control_run
@@ -1633,6 +1655,26 @@ def _run_aug_regression(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_view_direction(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    if args.view_direction_run is not None:
+        out = usage_view_direction.run_unit(
+            cfg, locations, args.view_direction_run, _stderr
+        )
+        print(f"wrote {out}")
+        return 0
+    written = usage_view_direction.write_notes(
+        cfg, locations, args.view_direction, args.note
+    )
+    if not written:
+        print(f"no unit files for runs {args.view_direction}_*", file=sys.stderr)
+        return 1
+    for out in written:
+        print(f"wrote {out}")
+    return 0
+
+
 def _run_svhn_control(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
@@ -2083,6 +2125,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_view_signal(args)
     if args.aug_regression is not None:
         return _run_aug_regression(args)
+    if args.view_direction is not None:
+        return _run_view_direction(args)
     if args.svhn_control is not None:
         return _run_svhn_control(args)
     if args.baseline_controls is not None:
