@@ -26,6 +26,7 @@ import pathlib
 import zlib
 
 import numpy
+import numpy.typing
 import torch
 from torch import nn
 
@@ -106,14 +107,15 @@ def _embed_shard(
     num_views: int,
     batch_size: int,
     generator: torch.Generator,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, numpy.typing.NDArray[numpy.float32]]:
     """Embeds the center view and `num_views` augmentations of `images[index]`.
 
     The augmentation parameters of all images are drawn up front (view by view),
     so the result does not depend on `batch_size`.
 
     Returns:
-        `z (N, K + 1, d_z)` and `h (N, K + 1, d_h)` on the CPU, center view first.
+        `z (N, K + 1, d_z)` and `h (N, K + 1, d_h)` on the CPU, center view first,
+        and the augmentation parameters `(N, K, len(shards.AUG_FIELDS))`.
     """
     device = generator.device
     spec = view_spec.global_spec(data_cfg)
@@ -139,7 +141,16 @@ def _embed_shard(
         z = projector(h.flatten(0, 1)).reshape(*h.shape[:2], -1)
         zs.append(z.float().cpu())
         hs.append(h.float().cpu())
-    return torch.cat(zs), torch.cat(hs)
+    aug = torch.stack(
+        [
+            torch.stack(
+                [getattr(p, name).float().cpu() for name in shards.AUG_FIELDS], dim=1
+            )
+            for p in params
+        ],
+        dim=1,
+    )
+    return torch.cat(zs), torch.cat(hs), aug.numpy()
 
 
 def _existing_shards(directory: pathlib.Path) -> list[pathlib.Path]:
@@ -264,7 +275,7 @@ def embed_run(
                         cfg.seed, name, source.corruption, source.severity, start
                     )
                 )
-                z, h = _embed_shard(
+                z, h, aug = _embed_shard(
                     backbone,
                     projector,
                     source.dataset.images,
@@ -289,6 +300,7 @@ def embed_run(
                             [source.corruption] * count, dtype=numpy.str_
                         ),
                         severity=numpy.full(count, source.severity, dtype=numpy.int8),
+                        aug=aug,
                     ),
                 )
                 part += 1

@@ -15,6 +15,23 @@ import numpy.typing
 CENTER_VIEW = 0
 # Suffix of a shard being written (not matched by `*.npz`).
 PARTIAL_SUFFIX = ".partial"
+# Columns of `EmbeddingShard.aug`: the parameters of an augmented view
+# (`data.gpu_views.ViewParams` fields without the jitter order), in this order.
+AUG_FIELDS = (
+    "top",
+    "left",
+    "height",
+    "width",
+    "flip",
+    "jitter",
+    "brightness",
+    "contrast",
+    "saturation",
+    "hue",
+    "grayscale",
+    "blur",
+    "sigma",
+)
 
 
 @dataclasses.dataclass
@@ -28,6 +45,9 @@ class EmbeddingShard:
         label: int64 `(N,)`; analysis only.
         corruption: str `(N,)`; empty string for clean images.
         severity: int8 `(N,)`; 0 for clean images.
+        aug: Optional float32 `(N, K, len(AUG_FIELDS))`: the augmentation parameters
+            of views 1..K (column `j` is `AUG_FIELDS[j]`; booleans as 0/1). Absent
+            (None) in dumps written before this field existed.
     """
 
     z: numpy.typing.NDArray[numpy.float32]
@@ -36,6 +56,7 @@ class EmbeddingShard:
     label: numpy.typing.NDArray[numpy.int64]
     corruption: numpy.typing.NDArray[numpy.str_]
     severity: numpy.typing.NDArray[numpy.int8]
+    aug: numpy.typing.NDArray[numpy.float32] | None = None
 
     def __post_init__(self) -> None:
         """Validates that all arrays agree on N and K."""
@@ -45,6 +66,14 @@ class EmbeddingShard:
         for name in ("image_id", "label", "corruption", "severity"):
             if getattr(self, name).shape != (n,):
                 raise ValueError(f"{name} must have shape ({n},)")
+        if self.aug is not None and self.aug.shape != (
+            n,
+            views - 1,
+            len(AUG_FIELDS),
+        ):
+            raise ValueError(
+                f"aug must have shape ({n}, {views - 1}, {len(AUG_FIELDS)})"
+            )
 
 
 def save_shard(path: str | os.PathLike[str], shard: EmbeddingShard) -> None:
@@ -56,7 +85,10 @@ def save_shard(path: str | os.PathLike[str], shard: EmbeddingShard) -> None:
     dest = pathlib.Path(path)
     partial = dest.with_name(dest.name + PARTIAL_SUFFIX)
     with partial.open("wb") as f:
-        numpy.savez(f, **dataclasses.asdict(shard))
+        arrays = dataclasses.asdict(shard)
+        if shard.aug is None:
+            del arrays["aug"]
+        numpy.savez(f, **arrays)
     os.replace(partial, dest)
 
 
@@ -105,7 +137,11 @@ def load_shard(path: str | os.PathLike[str]) -> EmbeddingShard:
     """Reads a shard written by `save_shard`, validating shapes."""
     with numpy.load(path, allow_pickle=False) as arrays:
         return EmbeddingShard(
-            **{f.name: arrays[f.name] for f in dataclasses.fields(EmbeddingShard)}
+            **{
+                f.name: arrays[f.name]
+                for f in dataclasses.fields(EmbeddingShard)
+                if f.name in arrays
+            }
         )
 
 

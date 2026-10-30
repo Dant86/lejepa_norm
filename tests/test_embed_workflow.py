@@ -219,6 +219,20 @@ def test_embed_writes_loadable_dump_with_correct_contents(
         assert not numpy.allclose(s.z[:, k], s.z[:, shards.CENTER_VIEW], atol=1e-3)
     assert not numpy.allclose(s.z[:, 1], s.z[:, 2], atol=1e-3)
 
+    # The augmentation parameters of views 1..K are saved and describe real crops.
+    assert s.aug is not None
+    assert s.aug.shape == (SIZES["stl10_test"], K, len(shards.AUG_FIELDS))
+    col = {name: s.aug[..., j] for j, name in enumerate(shards.AUG_FIELDS)}
+    height, width = raw.shape[1:3]
+    assert (col["height"] >= 1).all() and (col["width"] >= 1).all()
+    assert (col["top"] + col["height"] <= height).all()
+    assert (col["left"] + col["width"] <= width).all()
+    area = col["height"] * col["width"] / (height * width)
+    assert (area <= 1.0).all()
+    for flag in ("flip", "jitter", "grayscale", "blur"):
+        assert set(numpy.unique(col[flag]).tolist()) <= {0.0, 1.0}
+    assert not numpy.allclose(s.aug[:, 0], s.aug[:, 1])
+
 
 def test_embed_is_reproducible_and_seed_dependent(workspace: pathlib.Path) -> None:
     assert _run(workspace, "--sets", "stl10_test") == 0
@@ -227,6 +241,8 @@ def test_embed_is_reproducible_and_seed_dependent(workspace: pathlib.Path) -> No
     again = _dump(workspace)["stl10_test"]
     numpy.testing.assert_array_equal(first.z, again.z)
     numpy.testing.assert_array_equal(first.h, again.h)
+    assert first.aug is not None and again.aug is not None
+    numpy.testing.assert_array_equal(first.aug, again.aug)
 
     # Views are made on the device from one generator per shard: the number of
     # workers does not matter at all ...
@@ -242,6 +258,8 @@ def test_embed_is_reproducible_and_seed_dependent(workspace: pathlib.Path) -> No
     rerun = _dump(workspace)["stl10_test"]
     numpy.testing.assert_allclose(first.z, rerun.z, rtol=0, atol=1e-5)
     numpy.testing.assert_allclose(first.h, rerun.h, rtol=0, atol=1e-5)
+    assert rerun.aug is not None
+    numpy.testing.assert_array_equal(first.aug, rerun.aug)
 
     assert (
         _run(workspace, "--sets", "stl10_test", "--overwrite", "--set", "seed=1") == 0
