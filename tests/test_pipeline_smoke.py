@@ -29,6 +29,7 @@ SIZES = {
     ("stl10", "test"): 24,
     ("dtd", "test"): 12,
     ("svhn", "test"): 12,
+    ("places365", "val"): 12,
 }
 CORRUPTIONS = {"gaussian_noise": (1, 3), "contrast": (1, 3)}
 

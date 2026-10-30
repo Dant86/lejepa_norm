@@ -340,12 +340,14 @@ def roc_statistics(
     return auroc, fpr
 
 
-def _stratified_counts(
+def stratified_counts(
     num_id: int,
     num_ood: int,
     num_bootstrap: int,
     rng: numpy.random.Generator,
 ) -> FloatArray:
+    """Multiplicities `(B, num_id + num_ood)` of separate ID and OOD resamples."""
+
     def one(n: int) -> FloatArray:
         idx = rng.integers(0, n, size=(num_bootstrap, n))
         idx += numpy.arange(num_bootstrap)[:, None] * n
@@ -447,7 +449,7 @@ def evaluate(
                 done = 0
                 while done < num_bootstrap:
                     size = min(chunk, num_bootstrap - done)
-                    counts = _stratified_counts(n_id, n_ood, size, rng)
+                    counts = stratified_counts(n_id, n_ood, size, rng)
                     a, f = roc_statistics(matrix, is_ood, counts)
                     parts_a.append(a)
                     parts_f.append(f)

@@ -439,12 +439,19 @@ def evaluate_shards(
     query: shards.EmbeddingShard,
     cfg: config.EvalConfig,
     seed: int,
+    space: str = "z",
 ) -> Evaluation:
-    """`evaluate` on the z center views of the `stl10_train` / `stl10_test` dumps."""
+    """`evaluate` on the center views of the `stl10_train` / `stl10_test` dumps.
+
+    `space` is "z" (projector output, the default) or "h" (backbone feature; used
+    only for the E2 baselines, whose projector is discarded after training).
+    """
+    if space not in ("z", "h"):
+        raise ValueError(f"space must be 'z' or 'h', got {space!r}")
     return evaluate(
-        center_embeddings(bank.z),
+        center_embeddings(bank.z if space == "z" else bank.h),
         bank.label,
-        center_embeddings(query.z),
+        center_embeddings(query.z if space == "z" else query.h),
         query.label,
         k=cfg.knn_k,
         num_repeats=cfg.num_randomizations,

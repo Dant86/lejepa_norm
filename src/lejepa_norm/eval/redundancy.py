@@ -535,6 +535,7 @@ class FittedKernelRidge:
         rng: numpy.random.Generator | None = None,
         tau_multipliers: tuple[float, ...] = DEFAULT_TAU_MULTIPLIERS,
         alphas: tuple[float, ...] = DEFAULT_ALPHAS,
+        taus: tuple[float, ...] | None = None,
     ) -> None:
         """Fits the map.
 
@@ -546,6 +547,9 @@ class FittedKernelRidge:
             tau_multipliers: Bandwidth grid, as multiples of the median pairwise
                 cosine distance of `u`.
             alphas: Ridge penalty grid.
+            taus: Absolute bandwidths to choose from instead of the multiplier
+                grid (a single value skips the bandwidth search: one
+                eigendecomposition instead of one per multiplier).
         """
         rng = rng if rng is not None else numpy.random.default_rng(0)
         self._u = numpy.asarray(u, dtype=numpy.float64)
@@ -554,9 +558,11 @@ class FittedKernelRidge:
             raise ValueError("y must have one entry per row of u")
         grid = numpy.asarray(alphas, dtype=numpy.float64)
         base = _median_cosine_distance(self._u, rng)
+        candidates = (
+            taus if taus is not None else tuple(m * base for m in tau_multipliers)
+        )
         best: tuple[float, float, float, _CenteredKernelRidge] | None = None
-        for multiplier in tau_multipliers:
-            tau = multiplier * base
+        for tau in candidates:
             model = _CenteredKernelRidge(
                 _Spectrum(_gram(self._u, self._u, "exp_dot", tau)), t
             )

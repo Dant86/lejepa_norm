@@ -25,6 +25,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 STL_SIZES = {"unlabeled": 6, "train": 4, "test": 5}
 N_DTD = 4
 N_SVHN = 3
+N_PLACES = 3
 
 
 def _random_images(rng: np.random.Generator, n: int, side: int) -> np.ndarray:
@@ -62,6 +63,14 @@ def _write_fake_raw(data_dir: pathlib.Path) -> dict[str, np.ndarray]:
     scipy.io.savemat(
         raw / "test_32x32.mat", {"X": svhn.transpose(1, 2, 3, 0), "y": labels}
     )
+    places = raw / "val_256"
+    places.mkdir()
+    entries = []
+    for i, target in enumerate((7, 364, 0), start=1):
+        name = f"Places365_val_{i:08d}.jpg"
+        PIL.Image.fromarray(_random_images(rng, 1, 256)[0]).save(places / name)  # pyright: ignore[reportUnknownMemberType]
+        entries.append(f"{name} {target}")
+    (raw / "places365_val.txt").write_text("\n".join(entries))
     return stl_images
 
 
@@ -129,11 +138,18 @@ def test_build_creates_layout_and_corruptions(
     train_labels = np.load(layout.labels_path(tmp_path, "stl10", "train"))
     np.testing.assert_array_equal(train_labels, np.arange(4))
 
-    for dataset, n in (("dtd", N_DTD), ("svhn", N_SVHN)):
-        images = np.load(layout.images_path(tmp_path, dataset, "test"))
-        labels = np.load(layout.labels_path(tmp_path, dataset, "test"))
+    for dataset, split, n in (
+        ("dtd", "test", N_DTD),
+        ("svhn", "test", N_SVHN),
+        ("places365", "val", N_PLACES),
+    ):
+        images = np.load(layout.images_path(tmp_path, dataset, split))
+        labels = np.load(layout.labels_path(tmp_path, dataset, split))
         assert images.dtype == np.uint8 and images.shape == (n, 96, 96, 3)
         assert labels.dtype == np.int64 and labels.shape == (n,)
+    np.testing.assert_array_equal(
+        np.load(layout.labels_path(tmp_path, "places365", "val")), [7, 364, 0]
+    )
     np.testing.assert_array_equal(
         np.load(layout.labels_path(tmp_path, "svhn", "test")), [0, 1, 5]
     )
