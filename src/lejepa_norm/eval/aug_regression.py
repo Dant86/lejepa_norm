@@ -12,6 +12,9 @@ costs almost nothing. Part C asks whether the radius carries information about t
 view beyond its augmentation parameters (`analyze_view_quality`).
 """
 
+# pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+
 import dataclasses
 import typing
 
@@ -286,9 +289,9 @@ def tree_cv_r2(
             model = ensemble.HistGradientBoostingRegressor(
                 max_iter=200, learning_rate=0.1, max_leaf_nodes=15, random_state=seed
             )
-            model.fit(features[train].reshape(-1, width), yd[train].reshape(-1))  # pyright: ignore[reportUnknownMemberType]
+            model.fit(features[train].reshape(-1, width), yd[train].reshape(-1))
             pred = numpy.asarray(
-                model.predict(features[test].reshape(-1, width))  # pyright: ignore[reportUnknownMemberType]
+                model.predict(features[test].reshape(-1, width))
             ).reshape(-1, k)
             sse += float(((yd[test] - demean(pred)) ** 2).sum())
             total += float((yd[test] ** 2).sum())

@@ -14,7 +14,6 @@ import json
 import pathlib
 
 import numpy
-import plotly.graph_objects as go
 
 from lejepa_norm import config
 from lejepa_norm import paths
@@ -97,7 +96,7 @@ def run_unit(
     n, k, d = z.shape
     log(f"{run_name}: {n} images x {k} views")
     # The crops are drawn on the source image (STL-10 is 96 x 96).
-    design = aug_regression.build_design(dump.aug, 96, 96)
+    design = aug_regression.build_design(dump.aug.astype(numpy.float64), 96, 96)
     y = numpy.log(numpy.linalg.norm(z, axis=-1))
     rng = numpy.random.default_rng(cfg.seed)
     num_bootstrap = cfg.eval.num_bootstrap
@@ -360,7 +359,7 @@ def write_notes(
     return [path]
 
 
-def _figures(units: list[Unit]) -> dict[str, go.Figure]:
+def _figures(units: list[Unit]) -> dict[str, plotting.go.Figure]:
     """Effect curve of log crop area, one line per checkpoint."""
     series = {
         f"lam {u.lam:g} s{u.seed}": plotting.Series(u.curve_grid, u.curve)
