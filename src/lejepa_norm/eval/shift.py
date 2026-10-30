@@ -187,7 +187,7 @@ def load_unit(path: str | os.PathLike[str]) -> ShiftUnit:
         )
 
 
-def _cell_indices(
+def cell_indices(
     corrupted: shards.CenterShard,
 ) -> dict[CellId, numpy.typing.NDArray[numpy.intp]]:
     """Row indices of each (corruption, severity) cell, ordered by `image_id`."""
@@ -201,13 +201,6 @@ def _cell_indices(
                 numpy.argsort(corrupted.image_id[rows], kind="stable")
             ]
     return out
-
-
-def cell_indices(
-    corrupted: shards.CenterShard,
-) -> dict[CellId, numpy.typing.NDArray[numpy.intp]]:
-    """Row indices of each (corruption, severity) cell, ordered by `image_id`."""
-    return _cell_indices(corrupted)
 
 
 def evaluate_cells(
@@ -268,7 +261,7 @@ def evaluate_cells(
             clean_ids,
         )
     }
-    for cell, rows in _cell_indices(corrupted).items():
+    for cell, rows in cell_indices(corrupted).items():
         cells[cell] = (
             corrupted.z[rows].astype(numpy.float64),
             corrupted.label[rows],

@@ -67,6 +67,14 @@ and SVHN scores); z only, center views, memory-light. With `--shift PREFIX` (nee
 bootstrap over images, mean over seeds) into `<note stem>_lam<lambda>.md` next to
 `--note` (see `lejepa_norm.eval.usage_shift`, `shift`, `ood_radius`).
 
+With `--confidence-unit` (per-run mode, needs `--config`; no `--note`) one run's
+radius-vs-confidence statistics (error detection by the radius signals, nested
+comparison against the readers' own confidence, STL-10-C and OOD) are computed into
+`<runs_dir>/<run>/confidence_<space>.npz` (`--confidence-space z`, or `h` for the
+E2 baselines only); `--confidence PREFIX` aggregates them per group into
+`<note stem>_<space>_<group>.md` plus a summary section in `--note` (see
+`lejepa_norm.eval.usage_confidence`, `confidence`).
+
 With `--retrieval PREFIX`, Euclidean retrieval of z (class-level on the STL-10 center
 views, instance-level view-to-view on the augmented global views; see
 `lejepa_norm.eval.retrieval`) is evaluated under the radius conditions of the
@@ -199,6 +207,7 @@ from lejepa_norm.eval import sphere_compare
 from lejepa_norm.eval import svhn_control
 from lejepa_norm.eval import sweep
 from lejepa_norm.eval import transfer
+from lejepa_norm.eval import usage_confidence
 from lejepa_norm.eval import usage_shift
 
 logger = logging.getLogger(__name__)
@@ -282,6 +291,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         metavar="PREFIX",
         help="Aggregate the --shift-unit outputs of runs PREFIX_* per lambda "
         "(needs --config).",
+    )
+    mode.add_argument(
+        "--confidence",
+        metavar="PREFIX",
+        help="Aggregate the --confidence-unit outputs of runs PREFIX_* per group "
+        "(lambda for LeJEPA, loss for the E2 baselines) into notes next to --note "
+        "(see --confidence-space).",
     )
     mode.add_argument(
         "--svhn-control",
@@ -460,6 +476,26 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: compute the use-under-shift outcomes of the run.",
     )
     parser.add_argument(
+        "--confidence-unit",
+        action="store_true",
+        help="Per-run mode only: compute the radius-confidence statistics of the "
+        "run into <runs_dir>/<run>/confidence_<space>.npz.",
+    )
+    parser.add_argument(
+        "--confidence-part",
+        choices=usage_confidence.PARTS,
+        default="all",
+        help="With --confidence-unit: `ood` recomputes only the OOD groups of an "
+        "existing unit (e.g. when a new OOD dump becomes available).",
+    )
+    parser.add_argument(
+        "--confidence-space",
+        choices=usage_confidence.SPACES,
+        default="z",
+        help="With --confidence / --confidence-unit: z (default) or h. h only for "
+        "the E2 baselines (their projector is discarded after training).",
+    )
+    parser.add_argument(
         "--shift-part",
         choices=usage_shift.PARTS,
         default="both",
@@ -477,6 +513,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--svhn-control requires --config")
     if args.shift_unit and args.run_name is None:
         parser.error("--shift-unit requires --run-name")
+    if args.confidence_unit and (args.run_name is None or args.config is None):
+        parser.error("--confidence-unit requires --run-name and --config")
     if args.sigreg_power and args.config is None:
         parser.error("--sigreg-power requires --config")
     if args.retrieval is not None and args.config is None:
@@ -492,6 +530,7 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         or args.power_unit
         or args.power_list_units
         or args.shift_unit
+        or args.confidence_unit
         or args.svhn_control_stats
         or args.svhn_control_run
         or args.retrieval_run
@@ -1558,6 +1597,34 @@ def _run_shift(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_confidence_unit(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    out = usage_confidence.run_unit(
+        cfg,
+        locations,
+        args.run_name,
+        args.confidence_space,
+        _stderr,
+        args.confidence_part,
+    )
+    print(f"wrote {out}")
+    return 0
+
+
+def _run_confidence(args: argparse.Namespace) -> int:
+    locations = paths.load_paths()
+    for out in usage_confidence.write_notes(
+        locations,
+        args.confidence,
+        args.confidence_space,
+        args.note,
+        not args.no_figures,
+    ):
+        print(f"wrote {out}")
+    return 0
+
+
 def _run_aggregate_controls(args: argparse.Namespace) -> int:
     locations = paths.load_paths()
     by_lambda: dict[float, list[list[dict[str, str]]]] = {}
@@ -1934,6 +2001,10 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_shift(args)
     if args.shift_unit:
         return _run_shift_unit(args)
+    if args.confidence is not None:
+        return _run_confidence(args)
+    if args.confidence_unit:
+        return _run_confidence_unit(args)
     if args.aggregate_controls is not None:
         return _run_aggregate_controls(args)
     if args.epoch_unit is not None:
