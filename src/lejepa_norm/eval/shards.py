@@ -107,3 +107,34 @@ def load_shard(path: str | os.PathLike[str]) -> EmbeddingShard:
         return EmbeddingShard(
             **{f.name: arrays[f.name] for f in dataclasses.fields(EmbeddingShard)}
         )
+
+
+@dataclasses.dataclass
+class ViewShard:
+    """z of every view of N images, without the backbone feature `h`.
+
+    Attributes:
+        z: Projector outputs, float32 `(N, K + 1, d_z)`; view 0 is the center view.
+        image_id: int64 `(N,)`.
+        label: int64 `(N,)`.
+        corruption: str `(N,)`; empty string for clean images.
+        severity: int8 `(N,)`.
+    """
+
+    z: numpy.typing.NDArray[numpy.float32]
+    image_id: numpy.typing.NDArray[numpy.int64]
+    label: numpy.typing.NDArray[numpy.int64]
+    corruption: numpy.typing.NDArray[numpy.str_]
+    severity: numpy.typing.NDArray[numpy.int8]
+
+
+def load_view_shard(path: str | os.PathLike[str]) -> ViewShard:
+    """Reads `z` (all views) and the metadata of a shard, skipping `h`."""
+    with numpy.load(path, allow_pickle=False) as arrays:
+        return ViewShard(
+            z=arrays["z"],
+            image_id=arrays["image_id"],
+            label=arrays["label"],
+            corruption=arrays["corruption"],
+            severity=arrays["severity"],
+        )

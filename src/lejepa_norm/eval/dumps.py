@@ -111,3 +111,21 @@ def load_run(
         if shard is not None:
             loaded[name] = shard
     return loaded
+
+
+def load_view_set(directory: str | os.PathLike[str]) -> shards.ViewShard | None:
+    """Like `load_set` but keeps `z` of every view and drops `h` (None if no shards).
+
+    Memory is `N * (K + 1) * d_z` floats (about 3.7 GB for STL-10-C with K = 8).
+    """
+    files = sorted(pathlib.Path(directory).glob("*.npz"))
+    if not files:
+        return None
+    parts = [shards.load_view_shard(f) for f in files]
+    return shards.ViewShard(
+        z=numpy.concatenate([p.z for p in parts]),
+        image_id=numpy.concatenate([p.image_id for p in parts]),
+        label=numpy.concatenate([p.label for p in parts]),
+        corruption=numpy.concatenate([p.corruption for p in parts]),
+        severity=numpy.concatenate([p.severity for p in parts]),
+    )

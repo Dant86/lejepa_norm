@@ -67,6 +67,15 @@ and SVHN scores); z only, center views, memory-light. With `--shift PREFIX` (nee
 bootstrap over images, mean over seeds) into `<note stem>_lam<lambda>.md` next to
 `--note` (see `lejepa_norm.eval.usage_shift`, `shift`, `ood_radius`).
 
+With `--view-signal PREFIX` (needs `--config`), the radius view-signal study (radial
+vs tangential displacement under corruption, oracle clean radius, severity from the
+radius residual, radius-weighted multi-view aggregation; z only) is run: with
+`--view-signal-run RUN` one run's unit file is computed (STL-10-C with all views,
+needs about 64 GB), otherwise the units of the runs `PREFIX_*` are aggregated per
+lambda into `<note stem>_lam<lambda>.md` next to `--note`, which gets the
+cross-lambda summary
+(see `lejepa_norm.eval.view_signal`, `view_signal_stats`).
+
 With `--confidence-unit` (per-run mode, needs `--config`; no `--note`) one run's
 radius-vs-confidence statistics (error detection by the radius signals, nested
 comparison against the readers' own confidence, STL-10-C and OOD) are computed into
@@ -209,6 +218,7 @@ from lejepa_norm.eval import sweep
 from lejepa_norm.eval import transfer
 from lejepa_norm.eval import usage_confidence
 from lejepa_norm.eval import usage_shift
+from lejepa_norm.eval import usage_view_signal
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +267,15 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Euclidean retrieval of z under the radius conditions for runs "
         "PREFIX_* (needs --config); with --retrieval-run computes one run's shard, "
         "without it aggregates the shards into --note.",
+    )
+    mode.add_argument(
+        "--view-signal",
+        metavar="PREFIX",
+        help="Radius view-signal study (`lejepa_norm.eval.view_signal`; needs "
+        "--config): with --view-signal-run compute one run's unit "
+        "(`<runs_dir>/<run>/view_signal.npz`, STL-10-C with all views, ~64 GB), "
+        "otherwise aggregate the units of runs PREFIX_* per lambda into "
+        "`<note stem>_lam<lambda>.md` plus a summary in --note.",
     )
     mode.add_argument(
         "--compare-prefix",
@@ -476,6 +495,10 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: compute the use-under-shift outcomes of the run.",
     )
     parser.add_argument(
+        "--view-signal-run",
+        help="With --view-signal: compute only this run's unit file.",
+    )
+    parser.add_argument(
         "--confidence-unit",
         action="store_true",
         help="Per-run mode only: compute the radius-confidence statistics of the "
@@ -513,6 +536,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--svhn-control requires --config")
     if args.shift_unit and args.run_name is None:
         parser.error("--shift-unit requires --run-name")
+    if args.view_signal is not None and args.config is None:
+        parser.error("--view-signal requires --config")
     if args.confidence_unit and (args.run_name is None or args.config is None):
         parser.error("--confidence-unit requires --run-name and --config")
     if args.sigreg_power and args.config is None:
@@ -530,6 +555,7 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         or args.power_unit
         or args.power_list_units
         or args.shift_unit
+        or args.view_signal_run
         or args.confidence_unit
         or args.svhn_control_stats
         or args.svhn_control_run
@@ -1545,6 +1571,24 @@ def _run_shift_unit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_view_signal(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    if args.view_signal_run is not None:
+        out = usage_view_signal.run_unit(cfg, locations, args.view_signal_run, _stderr)
+        print(f"wrote {out}")
+        return 0
+    written = usage_view_signal.write_notes(
+        cfg, locations, args.view_signal, args.note, not args.no_figures
+    )
+    if not written:
+        print(f"no unit files for runs {args.view_signal}_*", file=sys.stderr)
+        return 1
+    for out in written:
+        print(f"wrote {out}")
+    return 0
+
+
 def _run_svhn_control(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
@@ -1991,6 +2035,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_lowlabel(args)
     if args.frozen_linear is not None:
         return _run_frozen_linear(args)
+    if args.view_signal is not None:
+        return _run_view_signal(args)
     if args.svhn_control is not None:
         return _run_svhn_control(args)
     if args.baseline_controls is not None:

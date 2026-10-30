@@ -188,7 +188,7 @@ def load_unit(path: str | os.PathLike[str]) -> ShiftUnit:
 
 
 def cell_indices(
-    corrupted: shards.CenterShard,
+    corrupted: shards.CenterShard | shards.ViewShard,
 ) -> dict[CellId, numpy.typing.NDArray[numpy.intp]]:
     """Row indices of each (corruption, severity) cell, ordered by `image_id`."""
     out: dict[CellId, numpy.typing.NDArray[numpy.intp]] = {}
