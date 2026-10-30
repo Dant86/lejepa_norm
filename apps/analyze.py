@@ -85,6 +85,15 @@ shards are skipped, so SLURM jobs can be requeued and run in parallel,
 `slurm/frozen_linear.sbatch`); without either the shards are aggregated per
 lambda into `--note`.
 
+With `--compare-prefix PREFIX --baseline-prefix BASELINE` (needs `--config`), the
+runs `PREFIX_*` are compared with the matching runs `BASELINE_*` (same lambda and
+seed index; z only): clean and STL-10-C accuracy of the E1 readers, class and
+instance retrieval and OOD detection, plus training-health curves (see
+`lejepa_norm.eval.sphere_compare`; built for E3, the model trained with
+`loss.radius_free`). `--compare-unit NAME` first computes one radius-free run's
+unit files under `<runs_dir>/NAME` (needs the five embedding dumps; GPU if
+available); without it the units are aggregated into `--note`.
+
 Reads the embedding dumps of `--run-name` (under `LEJEPA_NORM_EMBED_DIR`, layout
 in `lejepa_norm.eval.dumps`) and its training log (`metrics.jsonl` under
 `LEJEPA_NORM_RUNS_DIR/<run-name>/`), then writes markdown tables into generated
@@ -127,6 +136,12 @@ Examples:
         --frozen-linear radius_marginal --frozen-run radius_marginal_lam0.05_s0
     python apps/analyze.py --config configs/base.yaml \
         --frozen-linear radius_marginal --note radius_usage/frozen_linear_summary.md
+    python apps/analyze.py --config configs/base.yaml \
+        --compare-prefix sigreg_sphere --baseline-prefix radius_marginal \
+        --compare-unit sigreg_sphere_lam0.05_s0
+    python apps/analyze.py --config configs/base.yaml \
+        --compare-prefix sigreg_sphere --baseline-prefix radius_marginal \
+        --note sigreg_sphere/sphere_vs_radius.md
 """
 
 import argparse
@@ -155,6 +170,7 @@ from lejepa_norm.eval import randomization
 from lejepa_norm.eval import retrieval
 from lejepa_norm.eval import runlog
 from lejepa_norm.eval import sigreg_power
+from lejepa_norm.eval import sphere_compare
 from lejepa_norm.eval import sweep
 from lejepa_norm.eval import transfer
 from lejepa_norm.eval import usage_shift
@@ -199,6 +215,13 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Euclidean retrieval of z under the radius conditions for runs "
         "PREFIX_* (needs --config); with --retrieval-run computes one run's shard, "
         "without it aggregates the shards into --note.",
+    )
+    mode.add_argument(
+        "--compare-prefix",
+        metavar="PREFIX",
+        help="Compare runs PREFIX_* with --baseline-prefix runs (E3, needs "
+        "--config); --compare-unit computes one run's units, otherwise aggregate "
+        "into --note.",
     )
     mode.add_argument(
         "--lowlabel",
@@ -253,6 +276,16 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "--sigreg-power",
         action="store_true",
         help="Synthetic SIGReg power study (needs --config).",
+    )
+    parser.add_argument(
+        "--baseline-prefix",
+        help="With --compare-prefix: prefix of the runs compared against.",
+    )
+    parser.add_argument(
+        "--compare-unit",
+        metavar="RUN",
+        help="With --compare-prefix: compute this radius-free run's unit files "
+        "instead of aggregating.",
     )
     parser.add_argument(
         "--retrieval-run",
@@ -352,6 +385,10 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--sigreg-power requires --config")
     if args.retrieval is not None and args.config is None:
         parser.error("--retrieval requires --config")
+    if args.compare_prefix is not None and (
+        args.config is None or args.baseline_prefix is None
+    ):
+        parser.error("--compare-prefix requires --config and --baseline-prefix")
     if args.lowlabel is not None and args.config is None:
         parser.error("--lowlabel requires --config")
     if args.note is None and not (
@@ -360,6 +397,7 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         or args.power_list_units
         or args.shift_unit
         or args.retrieval_run
+        or args.compare_unit
         or args.lowlabel_run
         or args.frozen_run
         or args.frozen_list_runs
@@ -1313,6 +1351,29 @@ def _run_shift_unit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_compare(args: argparse.Namespace) -> int:
+    """E3: one radius-free run's units (`--compare-unit`) or the aggregate note."""
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    if args.compare_unit is not None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        for out in sphere_compare.run_unit(
+            cfg, locations, args.compare_unit, _stderr, device
+        ):
+            print(f"wrote {out}")
+        return 0
+    out = sphere_compare.write_note(
+        cfg,
+        locations,
+        args.compare_prefix,
+        args.baseline_prefix,
+        args.note,
+        not args.no_figures,
+    )
+    print(f"wrote {out}")
+    return 0
+
+
 def _run_shift(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
@@ -1689,6 +1750,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_lowlabel(args)
     if args.frozen_linear is not None:
         return _run_frozen_linear(args)
+    if args.compare_prefix is not None:
+        return _run_compare(args)
     if args.shift is not None:
         return _run_shift(args)
     if args.shift_unit:

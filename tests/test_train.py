@@ -385,3 +385,21 @@ def test_lr_schedule_endpoints_and_batch_scaling() -> None:
     assert schedule.lr_at(0, peak, 0, total) == pytest.approx(peak)
     with pytest.raises(ValueError):
         schedule.lr_at(0, peak, total + 1, total)
+
+
+def test_radius_free_training_smoke(env: pathlib.Path) -> None:
+    """tiny_cnn trains with `loss.radius_free`; the checkpoint remembers the flag."""
+    app = _load_app()
+    assert app.main(_train_argv("loss.radius_free=true", "train.epochs=2")) == 0
+    run_dir = env / "runs" / RUN
+    ckpt = checkpoint.load(run_dir / loop.LAST_CHECKPOINT)
+    assert ckpt.cfg.loss.radius_free is True
+    records = runlog.read_metrics(run_dir / runlog.METRICS_FILE)
+    steps = [r for r in records if r["kind"] == "step"]
+    assert steps
+    # The logged statistics describe the raw projector output (its radius is free).
+    assert all(
+        math.isfinite(r["loss_total"]) and math.isfinite(r["kappa_z"]) for r in steps
+    )
+    epoch_records = [r for r in records if r["kind"] == "epoch"]
+    assert {"knn_acc_h", "knn_acc_z"} <= set(epoch_records[-1])

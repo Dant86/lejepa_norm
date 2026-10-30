@@ -76,6 +76,9 @@ class LossConfig:
     num_slices: int = 1024
     num_points: int = 17
     t_max: float = 3.0
+    # E3 (`sigreg-sphere`): replace z by sqrt(d) * z / ||z|| before BOTH the
+    # invariance loss and SIGReg, so the embedding radius is exactly constant.
+    radius_free: bool = False
 
 
 @dataclasses.dataclass
