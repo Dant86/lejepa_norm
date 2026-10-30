@@ -137,6 +137,13 @@ class EvalConfig:
     retrieval_margin: float = 0.005
     # Random labeled subsets per budget in the low-label study (`analyze --lowlabel`).
     lowlabel_subsets: int = 10
+    # E2 controls (`analyze --baseline-controls`): random smooth functions drawn per
+    # family, size of the fixed held-out set of the learning curve, and the
+    # saturation margin of the curve in R^2 units (R^2 at the largest N versus at
+    # 4000; fixed before any curve was computed).
+    smooth_draws: int = 50
+    curve_holdout: int = 2000
+    curve_margin: float = 0.01
 
 
 @dataclasses.dataclass

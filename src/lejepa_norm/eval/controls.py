@@ -113,11 +113,20 @@ def run_setup(
     rng: numpy.random.Generator,
 ) -> Row:
     """Held-out `R^2`, permutation null and F-test of one setup."""
+    return run_setup_detailed(setup, cfg, rng)[0]
+
+
+def run_setup_detailed(
+    setup: Setup,
+    cfg: config.EvalConfig,
+    rng: numpy.random.Generator,
+) -> tuple[Row, redundancy.RegressionResult]:
+    """`run_setup` plus the held-out predictions behind its `R^2` (for bootstraps)."""
     model = redundancy.NestedKernelRidge(setup.u, "exp_dot", cfg.cv_folds, rng)
     test = redundancy.permutation_test(model, setup.rho, cfg.num_permutations, rng)
     ftest = redundancy.f_test(setup.u, setup.rho)
     null = test.null
-    return {
+    row: Row = {
         "setup": setup.name,
         "N": setup.rho.size,
         "r2 (nested CV, kernel)": test.observed,
@@ -131,6 +140,7 @@ def run_setup(
         "F p": ftest.p_value,
         "r2 (in-sample, linear)": ftest.r2,
     }
+    return row, model.fit(setup.rho)
 
 
 def run_redundancy_controls(
