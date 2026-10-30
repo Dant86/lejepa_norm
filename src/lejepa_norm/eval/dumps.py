@@ -49,6 +49,7 @@ def concatenate(parts: list[shards.EmbeddingShard]) -> shards.EmbeddingShard:
     """
     if not parts:
         raise ValueError("nothing to concatenate")
+    augs = [p.aug for p in parts]
     return shards.EmbeddingShard(
         z=numpy.concatenate([p.z for p in parts]),
         h=numpy.concatenate([p.h for p in parts]),
@@ -56,6 +57,9 @@ def concatenate(parts: list[shards.EmbeddingShard]) -> shards.EmbeddingShard:
         label=numpy.concatenate([p.label for p in parts]),
         corruption=numpy.concatenate([p.corruption for p in parts]),
         severity=numpy.concatenate([p.severity for p in parts]),
+        aug=None
+        if any(a is None for a in augs)
+        else numpy.concatenate([a for a in augs if a is not None]),
     )
 
 
@@ -70,6 +74,7 @@ def take(
         label=shard.label[index],
         corruption=shard.corruption[index],
         severity=shard.severity[index],
+        aug=None if shard.aug is None else shard.aug[index],
     )
 
 

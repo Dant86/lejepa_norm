@@ -76,6 +76,14 @@ lambda into `<note stem>_lam<lambda>.md` next to `--note`, which gets the
 cross-lambda summary
 (see `lejepa_norm.eval.view_signal`, `view_signal_stats`).
 
+With `--aug-regression PREFIX` (needs `--config`), the augmentation-parameter
+regression of the view radius is run on the re-embedded `stl10_test` dumps
+(`augreg_<run>`, which hold the parameters of every view): with
+`--aug-regression-run RUN` one run's unit file (`<runs_dir>/augreg_<run>/
+aug_regression.json`) is computed, otherwise the units of the runs `PREFIX_*` are
+written as generated sections of `--note` (see `lejepa_norm.eval.aug_regression`,
+`usage_aug_regression`).
+
 With `--confidence-unit` (per-run mode, needs `--config`; no `--note`) one run's
 radius-vs-confidence statistics (error detection by the radius signals, nested
 comparison against the readers' own confidence, STL-10-C and OOD) are computed into
@@ -216,6 +224,7 @@ from lejepa_norm.eval import sphere_compare
 from lejepa_norm.eval import svhn_control
 from lejepa_norm.eval import sweep
 from lejepa_norm.eval import transfer
+from lejepa_norm.eval import usage_aug_regression
 from lejepa_norm.eval import usage_confidence
 from lejepa_norm.eval import usage_shift
 from lejepa_norm.eval import usage_view_signal
@@ -276,6 +285,14 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         "(`<runs_dir>/<run>/view_signal.npz`, STL-10-C with all views, ~64 GB), "
         "otherwise aggregate the units of runs PREFIX_* per lambda into "
         "`<note stem>_lam<lambda>.md` plus a summary in --note.",
+    )
+    mode.add_argument(
+        "--aug-regression",
+        metavar="PREFIX",
+        help="Regression of the view radius on its augmentation parameters "
+        "(`lejepa_norm.eval.aug_regression`; needs --config): with "
+        "--aug-regression-run compute one run's unit, otherwise write the sections "
+        "of --note from the units of runs PREFIX_*.",
     )
     mode.add_argument(
         "--compare-prefix",
@@ -495,6 +512,10 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         help="Per-run mode only: compute the use-under-shift outcomes of the run.",
     )
     parser.add_argument(
+        "--aug-regression-run",
+        help="With --aug-regression: compute only this run's unit file.",
+    )
+    parser.add_argument(
         "--view-signal-run",
         help="With --view-signal: compute only this run's unit file.",
     )
@@ -538,6 +559,8 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         parser.error("--shift-unit requires --run-name")
     if args.view_signal is not None and args.config is None:
         parser.error("--view-signal requires --config")
+    if args.aug_regression is not None and args.config is None:
+        parser.error("--aug-regression requires --config")
     if args.confidence_unit and (args.run_name is None or args.config is None):
         parser.error("--confidence-unit requires --run-name and --config")
     if args.sigreg_power and args.config is None:
@@ -556,6 +579,7 @@ def _parse(argv: collections.abc.Sequence[str]) -> argparse.Namespace:
         or args.power_list_units
         or args.shift_unit
         or args.view_signal_run
+        or args.aug_regression_run
         or args.confidence_unit
         or args.svhn_control_stats
         or args.svhn_control_run
@@ -1589,6 +1613,26 @@ def _run_view_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_aug_regression(args: argparse.Namespace) -> int:
+    cfg = config.load_config(args.config, args.overrides)
+    locations = paths.load_paths()
+    if args.aug_regression_run is not None:
+        out = usage_aug_regression.run_unit(
+            cfg, locations, args.aug_regression_run, _stderr
+        )
+        print(f"wrote {out}")
+        return 0
+    written = usage_aug_regression.write_notes(
+        cfg, locations, args.aug_regression, args.note, not args.no_figures
+    )
+    if not written:
+        print(f"no unit files for runs {args.aug_regression}_*", file=sys.stderr)
+        return 1
+    for out in written:
+        print(f"wrote {out}")
+    return 0
+
+
 def _run_svhn_control(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config, args.overrides)
     locations = paths.load_paths()
@@ -2037,6 +2081,8 @@ def main(argv: collections.abc.Sequence[str]) -> int:
         return _run_frozen_linear(args)
     if args.view_signal is not None:
         return _run_view_signal(args)
+    if args.aug_regression is not None:
+        return _run_aug_regression(args)
     if args.svhn_control is not None:
         return _run_svhn_control(args)
     if args.baseline_controls is not None:

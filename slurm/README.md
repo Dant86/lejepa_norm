@@ -14,6 +14,7 @@ preemption: [batch-jobs guide](https://cluster-policy.ds.uchicago.edu/using-the-
 | `analyze.sbatch` | `apps/analyze.py` | CPU | recomputes (idempotent) |
 | `lowlabel.sbatch` | `apps/analyze.py --lowlabel PREFIX --lowlabel-run RUN` | CPU (4) | recomputes the run (shard written atomically) |
 | `view_signal.sbatch` | `apps/analyze.py --view-signal PREFIX --view-signal-run RUN` (64 GB: STL-10-C with all views) | CPU (8) | recomputes the run (unit file written atomically) |
+| `aug_regression.sbatch` | `apps/analyze.py --aug-regression PREFIX --aug-regression-run RUN` (16 GB, 4 CPUs: reads the `augreg_RUN` stl10_test dump) | CPU (4) | recomputes the run (unit file written at the end) |
 | `frozen_linear.sbatch` | `apps/analyze.py --frozen-linear` (array, one run per task) | CPU | skips finished shards |
 | `embed_random_init.sbatch` | `apps/embed.py --random-init` (array: BN mode x seed; untrained E2 baseline, `stl10_train` + `stl10_test`) | 1 GPU (any type), 2 h | writes only missing shards, reuses the untrained `last.pt` |
 | `baseline_controls.sbatch` | `apps/analyze.py --baseline-controls` (array, one run per task; E2 controls) | CPU, 8, 48 GB | skips finished shards |
