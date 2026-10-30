@@ -88,6 +88,9 @@ class LossConfig:
     cov_coeff: float = 1.0
     # Supervised baseline: classes of the linear head on z.
     num_classes: int = 10
+    # E3 (`sigreg-sphere`): replace z by sqrt(d) * z / ||z|| before BOTH the
+    # invariance loss and SIGReg, so the embedding radius is exactly constant.
+    radius_free: bool = False
 
 
 @dataclasses.dataclass
