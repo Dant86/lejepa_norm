@@ -106,3 +106,18 @@ def load_pretraining_images(
             for split in ("unlabeled", "train")
         ]
     )
+
+
+def load_labeled_train(
+    data_dir: str | os.PathLike[str], in_memory: bool = True
+) -> tuple[batches.ArrayConcat, np.ndarray]:
+    """STL-10 `train` (5000 labeled images) and its int64 labels.
+
+    Used only by the supervised baseline; every other run pretrains on the labels-free
+    `unlabeled` + `train` pool (`load_pretraining_images`).
+    """
+    images = batches.ArrayConcat(
+        [_load_images(layout.images_path(data_dir, "stl10", "train"), in_memory)]
+    )
+    labels = np.load(layout.labels_path(data_dir, "stl10", "train")).astype(np.int64)
+    return images, labels

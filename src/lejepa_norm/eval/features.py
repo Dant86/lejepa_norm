@@ -160,3 +160,22 @@ def view_consistency(
     # ||sum_k u_k||^2 = K + 2 * sum_{j<k} u_j . u_k for unit vectors.
     total = numpy.square(u.sum(axis=1)).sum(axis=-1)
     return (total - k) / (k * (k - 1))
+
+
+def mean_log_radius_and_direction(
+    x: numpy.typing.NDArray[numpy.floating[typing.Any]],
+    views: ViewSelection = "augmented",
+    chunk: int = 4096,
+) -> tuple[FloatArray, FloatArray]:
+    """`(rho_bar, u_hat)` of an `(N, K + 1, d)` array, computed in chunks of images.
+
+    Equivalent to `summarize(x, views)` for those two fields, without ever
+    materializing a float64 copy of the whole array.
+    """
+    parts = [summarize(x[i : i + chunk], views) for i in range(0, x.shape[0], chunk)]
+    if not parts:
+        return numpy.zeros(0), numpy.zeros((0, x.shape[-1]))
+    return (
+        numpy.concatenate([p.rho_bar for p in parts]),
+        numpy.concatenate([p.u_hat for p in parts]),
+    )

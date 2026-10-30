@@ -174,6 +174,7 @@ def line_plot(
     x_title: str,
     y_title: str,
     reference: float | None = None,
+    log_x: bool = False,
 ) -> go.Figure:
     """Lines with markers and optional CI error bars (e.g. metric vs severity).
 
@@ -183,11 +184,15 @@ def line_plot(
         x_title: X axis title.
         y_title: Y axis title.
         reference: Optional horizontal reference line (e.g. kappa = 1).
+        log_x: Logarithmic x axis.
 
     Returns:
         The figure.
     """
     fig = _figure(title, x_title, y_title)
+    if log_x:
+        ticks = sorted({float(x) for s in series.values() for x in s.x})
+        fig.update_xaxes(type="log", tickvals=ticks, ticktext=[f"{t:g}" for t in ticks])
     for i, (name, s) in enumerate(series.items()):
         color, dash = _style(i)
         error_y = None
@@ -217,6 +222,85 @@ def line_plot(
     return fig
 
 
+def dual_axis_line_plot(
+    left: collections.abc.Mapping[str, Series],
+    right: collections.abc.Mapping[str, Series],
+    title: str,
+    x_title: str,
+    left_title: str,
+    right_title: str,
+    right_reference: float | None = None,
+) -> go.Figure:
+    """Two groups of lines over a shared x axis, with a second y axis on the right.
+
+    Left series are solid, right series dashed; colors continue across the groups
+    so that no two lines share a color.
+
+    Args:
+        left: Series drawn against the left y axis (name to series).
+        right: Series drawn against the right y axis.
+        title: Figure title.
+        x_title: X axis title.
+        left_title: Left y axis title.
+        right_title: Right y axis title.
+        right_reference: Optional horizontal reference line on the right axis.
+
+    Returns:
+        The figure.
+    """
+    fig = _figure(title, x_title, left_title)
+    fig.update_layout(
+        yaxis2={
+            "title": right_title,
+            "overlaying": "y",
+            "side": "right",
+            "showgrid": False,
+            "linecolor": MUTED_COLOR,
+        },
+        margin={"l": 70, "r": 70, "t": 60, "b": 60},
+    )
+    groups = ((left, "y", "solid"), (right, "y2", "dash"))
+    index = 0
+    for group, axis, dash in groups:
+        for name, s in group.items():
+            error_y = None
+            if s.low is not None and s.high is not None:
+                y = numpy.asarray(s.y, dtype=numpy.float64)
+                error_y = {
+                    "type": "data",
+                    "symmetric": False,
+                    "array": numpy.asarray(s.high, dtype=numpy.float64) - y,
+                    "arrayminus": y - numpy.asarray(s.low, dtype=numpy.float64),
+                    "thickness": 1,
+                    "width": 3,
+                }
+            fig.add_trace(
+                go.Scatter(
+                    x=list(s.x),
+                    y=list(s.y),
+                    mode="lines+markers",
+                    name=name,
+                    yaxis=axis,
+                    line={"color": COLORS[index % len(COLORS)], "dash": dash},
+                    marker={"size": 8},
+                    error_y=error_y,
+                )
+            )
+            index += 1
+    if right_reference is not None:
+        fig.add_shape(
+            type="line",
+            xref="paper",
+            x0=0,
+            x1=1,
+            yref="y2",
+            y0=right_reference,
+            y1=right_reference,
+            line={"color": MUTED_COLOR, "dash": "dot"},
+        )
+    return fig
+
+
 def scatter(
     x: numpy.typing.ArrayLike,
     y: numpy.typing.ArrayLike,
@@ -235,6 +319,49 @@ def scatter(
             showlegend=False,
         )
     )
+    return fig
+
+
+def bar_plot(
+    values: collections.abc.Mapping[str, tuple[float, float, float]],
+    title: str,
+    x_title: str,
+    reference: float | None = None,
+) -> go.Figure:
+    """Horizontal bars with asymmetric CI error bars.
+
+    Args:
+        values: Label to `(value, low, high)`; the first label is drawn at the top.
+        title: Figure title.
+        x_title: Value axis title.
+        reference: Optional vertical reference line (e.g. chance level).
+
+    Returns:
+        The figure.
+    """
+    labels = list(values)
+    fig = _figure(title, x_title, "")
+    fig.add_trace(
+        go.Bar(
+            x=[values[k][0] for k in labels],
+            y=labels,
+            orientation="h",
+            marker={"color": COLORS[0]},
+            error_x={
+                "type": "data",
+                "symmetric": False,
+                "array": [values[k][2] - values[k][0] for k in labels],
+                "arrayminus": [values[k][0] - values[k][1] for k in labels],
+                "thickness": 1,
+                "width": 3,
+            },
+            showlegend=False,
+        )
+    )
+    fig.update_yaxes(autorange="reversed", automargin=True)
+    fig.update_layout(width=WIDTH + 400, margin={"l": 360})
+    if reference is not None:
+        fig.add_vline(x=reference, line={"color": MUTED_COLOR, "dash": "dot"})
     return fig
 
 

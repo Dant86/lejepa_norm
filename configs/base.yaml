@@ -47,3 +47,17 @@ eval:
   max_kernel_images: 4000
   # Permutations of the radius in the redundancy controls (`analyze --redundancy-controls`).
   num_permutations: 500
+  # Synthetic SIGReg power study (`analyze --sigreg-power`).
+  power_reps: 200
+  power_grad_reps: 20
+  power_real_reps: 20
+  # Radius randomizations (permutations) per condition of `analyze --randomize-radius`.
+  num_randomizations: 5
+  # Equivalence margin (accuracy units) for the same analysis, set before seeing results.
+  equivalence_margin: 0.005
+  # E2 controls (`analyze --baseline-controls`): random smooth functions per family,
+  # held-out images of the learning curve, and its saturation margin (R^2 units),
+  # fixed before any curve was computed.
+  smooth_draws: 50
+  curve_holdout: 2000
+  curve_margin: 0.01

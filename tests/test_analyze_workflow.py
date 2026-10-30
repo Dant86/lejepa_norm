@@ -260,6 +260,39 @@ def test_analyze_aggregates_controls_notes_per_lambda(
     assert note.read_text() == text  # idempotent
 
 
+def test_analyze_transfer_mode_and_aggregation(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, fake_run: pathlib.Path
+) -> None:
+    _setup_env(tmp_path, monkeypatch, fake_run)
+    app = _load_app()
+    argv = _argv("--transfer", "--no-figures")
+    assert app.main(argv) == 0
+    note = tmp_path / "notes" / "idea" / "exp.md"
+    text = note.read_text()
+    assert "BEGIN GENERATED: analyze.radius_transfer" in text
+    assert "BEGIN GENERATED: analyze.marginal" not in text  # nothing else runs
+    assert "h is not analyzed; LeJEPA's product is z." in text
+    rows = [
+        ln
+        for ln in text.splitlines()
+        if ln.startswith(("| contrast |", "| pixelate |"))
+    ]
+    assert len(rows) == 6  # two corruptions x three severities
+    assert any(ln.startswith("| clean (reference) |") for ln in text.splitlines())
+    assert list(note.parent.glob("*.png")) == []
+    assert app.main(argv) == 0
+    assert note.read_text() == text  # idempotent
+
+    cfg = config.load_config(REPO / "configs" / "base.yaml", ["loss.lambda=0.05"])
+    config.save_resolved(cfg, fake_run / "runs" / RUN)
+    summary = tmp_path / "notes" / "idea" / "summary.md"
+    agg = ["--aggregate-transfer", "idea/exp.md", "idea/exp.md", "--note"]
+    assert app.main([*agg, "idea/summary.md"]) == 0
+    lines = summary.read_text().splitlines()
+    agg_rows = [ln for ln in lines if ln.startswith("| 0.05 |")]
+    assert len(agg_rows) == 7 and all("| 2 |" in ln for ln in agg_rows)
+
+
 def test_analyze_redundancy_controls_needs_a_run() -> None:
     with pytest.raises(SystemExit):
         _load_app().main(["--sweep", "x", "--note", "n.md", "--redundancy-controls"])

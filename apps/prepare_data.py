@@ -1,8 +1,8 @@
 """Prepares datasets under `LEJEPA_NORM_DATA_DIR`.
 
 Stages:
-  download  Fetch canonical STL-10, DTD and SVHN archives (needs network; run on
-            the login node).
+  download  Fetch canonical STL-10, DTD, SVHN and Places365 archives (needs
+            network; run on the login node).
   build     Convert to the prepared layout and generate STL-10-C (offline,
             CPU-heavy; run under SLURM).
   stats     Compute per-channel mean/std of the pretraining images (STL-10

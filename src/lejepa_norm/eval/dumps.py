@@ -9,8 +9,10 @@ evaluation set; each directory holds any number of `.npz` shards
 Evaluation sets (see `EVAL_SETS`): `stl10_train` (labeled bank for probes and
 k-NN), `stl10_test` (clean test images), `stl10c` (STL-10 `test` under
 corruptions; `image_id` indexes `stl10_test`, `corruption`/`severity` set per
-image), `dtd_test` and `svhn_test` (OOD sets). Sets that are missing on disk
-are skipped by the analyses that need them.
+image), `dtd_test` and `svhn_test` (OOD sets) and `places_test` (Places365
+validation downsampled to 96x96; the OOD set of the Places control, not part of
+`OOD_SETS`, which the shift study loops over). Sets that are missing on disk are
+skipped by the analyses that need them.
 """
 
 import os
@@ -27,7 +29,8 @@ STL10_TEST = "stl10_test"
 STL10_C = "stl10c"
 DTD_TEST = "dtd_test"
 SVHN_TEST = "svhn_test"
-EVAL_SETS = (STL10_TRAIN, STL10_TEST, STL10_C, DTD_TEST, SVHN_TEST)
+PLACES_TEST = "places_test"
+EVAL_SETS = (STL10_TRAIN, STL10_TEST, STL10_C, DTD_TEST, SVHN_TEST, PLACES_TEST)
 OOD_SETS = (DTD_TEST, SVHN_TEST)
 
 
@@ -78,6 +81,26 @@ def load_set(directory: str | os.PathLike[str]) -> shards.EmbeddingShard | None:
     return concatenate([shards.load_shard(f) for f in files])
 
 
+def load_center_set(
+    directory: str | os.PathLike[str], space: str = "z"
+) -> shards.CenterShard | None:
+    """Like `load_set` but keeps only the center view of `space` (None if no shards).
+
+    Memory is `N * d_z` floats, so even STL-10-C (400k images) fits easily.
+    """
+    files = sorted(pathlib.Path(directory).glob("*.npz"))
+    if not files:
+        return None
+    parts = [shards.load_center_shard(f, space) for f in files]
+    return shards.CenterShard(
+        z=numpy.concatenate([p.z for p in parts]),
+        image_id=numpy.concatenate([p.image_id for p in parts]),
+        label=numpy.concatenate([p.label for p in parts]),
+        corruption=numpy.concatenate([p.corruption for p in parts]),
+        severity=numpy.concatenate([p.severity for p in parts]),
+    )
+
+
 def load_run(
     embed_dir: str | os.PathLike[str], run_name: str
 ) -> dict[str, shards.EmbeddingShard]:
@@ -88,3 +111,21 @@ def load_run(
         if shard is not None:
             loaded[name] = shard
     return loaded
+
+
+def load_view_set(directory: str | os.PathLike[str]) -> shards.ViewShard | None:
+    """Like `load_set` but keeps `z` of every view and drops `h` (None if no shards).
+
+    Memory is `N * (K + 1) * d_z` floats (about 3.7 GB for STL-10-C with K = 8).
+    """
+    files = sorted(pathlib.Path(directory).glob("*.npz"))
+    if not files:
+        return None
+    parts = [shards.load_view_shard(f) for f in files]
+    return shards.ViewShard(
+        z=numpy.concatenate([p.z for p in parts]),
+        image_id=numpy.concatenate([p.image_id for p in parts]),
+        label=numpy.concatenate([p.label for p in parts]),
+        corruption=numpy.concatenate([p.corruption for p in parts]),
+        severity=numpy.concatenate([p.severity for p in parts]),
+    )
