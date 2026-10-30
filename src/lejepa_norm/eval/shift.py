@@ -203,6 +203,13 @@ def _cell_indices(
     return out
 
 
+def cell_indices(
+    corrupted: shards.CenterShard,
+) -> dict[CellId, numpy.typing.NDArray[numpy.intp]]:
+    """Row indices of each (corruption, severity) cell, ordered by `image_id`."""
+    return _cell_indices(corrupted)
+
+
 def evaluate_cells(
     bank: FloatArray,
     bank_labels: numpy.typing.ArrayLike,
